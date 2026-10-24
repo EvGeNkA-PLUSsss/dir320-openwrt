@@ -22,6 +22,7 @@ jobs:
         run: |
           ls -l dist/
           sh -n dist/dir320-tui.sh
+          python3 -c "import sys; d=open('dist/dir320-tui.sh','rb').read(); sys.exit(1 if b'\r' in d else 0)" && echo 'LF-only OK'
 
       - name: Sanity checks
         run: |

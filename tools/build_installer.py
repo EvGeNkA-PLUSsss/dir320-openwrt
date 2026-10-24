@@ -68,12 +68,17 @@ def main() -> None:
 
     out = pathlib.Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(text, encoding="utf-8")
+    # пишем байтами: text-режим на Windows превратил бы LF в CRLF,
+    # а busybox ash на роутере такой файл не разбирает
+    data = text.encode("utf-8")
+    if b"\r" in data:
+        fail("в результате есть CR (CRLF): установщик на роутере не запустится")
+    out.write_bytes(data)
     try:
         os.chmod(out, 0o755)
     except OSError:
         pass  # Windows
-    print(f"built {out} ({out.stat().st_size} bytes)")
+    print(f"built {out} ({out.stat().st_size} bytes, LF-only)")
 
 
 if __name__ == "__main__":
