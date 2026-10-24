@@ -13,7 +13,7 @@ PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 TAB=$(printf '\t')
 
-VERSION="2.1.0"
+VERSION="2.1.1"
 SITE=/srv/www
 PANEL_CONSOLE=/usr/libexec/panel-console.sh
 FTPSRV=/usr/sbin/vsftpd

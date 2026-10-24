@@ -410,17 +410,59 @@ local function human_size(n)
   return string.format("%.1f %s", n, units[i])
 end
 
--- ============================ extra helpers ==========================
+-- ============================ wifi ==================================
+
+local function uci_set(key, val)
+  local rc = os.execute("uci set " .. shq(key) .. "=" .. shq(val) .. " 2>/dev/null")
+  return rc == 0 or rc == true
+end
+
+-- Имена секций wifi-device / wifi-iface. Работает и с именованными
+-- (radio0/default_radio0), и с анонимными (@wifi-device[0]) секциями.
+local function wifi_sections()
+  local out = exec("uci -q show wireless 2>/dev/null")
+  if out == "" then return nil, nil end
+  local dev, iface
+  -- строки вида: wireless.radio0=wifi-device и wireless.radio0.channel='11'
+  for line in out:gmatch("[^\n]+") do
+    local sec, typ = line:match("^wireless%.([^%=]+)=([%w%-]+)$")
+    if sec then
+      if typ == "wifi-device" and not dev then dev = sec end
+      if typ == "wifi-iface" and not iface then iface = sec end
+    end
+  end
+  return dev, iface
+end
+
+-- Если /etc/config/wireless вообще нет (чистая прошивка) — генерируем его
+local function ensure_wireless()
+  if exec("uci -q show wireless 2>/dev/null") ~= "" then return true end
+  os.execute("wifi config >/dev/null 2>&1")
+  if exec("uci -q show wireless 2>/dev/null") == "" then
+    os.execute("wifi detect > /etc/config/wireless 2>/dev/null")
+  end
+  return exec("uci -q show wireless 2>/dev/null") ~= ""
+end
 
 local function wifi_config()
-  local dis = uci_get("wireless.radio0.disabled")
+  local inf = wifi_info()
+  local dev, iface = wifi_sections()
+  if not dev then
+    return { present = false, enabled = false, ssid = inf.essid or "",
+             key = "", channel = inf.channel or 0, encryption = "", info = inf }
+  end
+  local dis = uci_get("wireless." .. dev .. ".disabled")
+  local ssid = iface and uci_get("wireless." .. iface .. ".ssid") or ""
+  local key = iface and uci_get("wireless." .. iface .. ".key") or ""
+  local enc = iface and uci_get("wireless." .. iface .. ".encryption") or ""
   return {
+    present = true,
     enabled = (dis ~= "1"),
-    ssid = uci_get("wireless.default_radio0.ssid"),
-    key = uci_get("wireless.default_radio0.key"),
-    channel = tonumber(uci_get("wireless.radio0.channel")) or 0,
-    encryption = uci_get("wireless.default_radio0.encryption"),
-    info = wifi_info(),
+    ssid = ssid ~= "" and ssid or (inf.essid or ""),
+    key = key,
+    channel = tonumber(uci_get("wireless." .. dev .. ".channel")) or inf.channel or 0,
+    encryption = enc,
+    info = inf,
   }
 end
 
@@ -431,16 +473,36 @@ local function set_wifi(f)
   local en = (f.enabled == "1" or f.enabled == "true")
   if ssid == "" or #ssid > 32 then return false, "неверный SSID (1..32 символа)" end
   if en and #key < 8 then return false, "пароль Wi-Fi от 8 до 63 символов" end
+  if #key > 63 then return false, "пароль Wi-Fi длиннее 63 символов" end
   if ch < 1 or ch > 13 then return false, "канал должен быть 1..13" end
-  os.execute("uci set wireless.radio0.disabled=" .. shq(en and "0" or "1"))
-  os.execute("uci set wireless.radio0.channel=" .. shq(tostring(ch)))
-  os.execute("uci set wireless.default_radio0.ssid=" .. shq(ssid))
-  if #key >= 8 then
-    os.execute("uci set wireless.default_radio0.encryption='psk2'")
-    os.execute("uci set wireless.default_radio0.key=" .. shq(key))
+  if not ensure_wireless() then return false, "Wi-Fi не найден: нет /etc/config/wireless" end
+  local dev, iface = wifi_sections()
+  if not dev then return false, "в /etc/config/wireless нет wifi-device" end
+  if not iface then
+    os.execute("uci add wireless wifi-iface >/dev/null 2>&1")
+    dev, iface = wifi_sections()
+  end
+  if not iface then return false, "не удалось создать wifi-iface" end
+
+  local sets = {
+    { "wireless." .. dev .. ".disabled", en and "0" or "1" },
+    { "wireless." .. dev .. ".channel", tostring(ch) },
+    { "wireless." .. iface .. ".mode", "ap" },
+    { "wireless." .. iface .. ".network", "lan" },
+    { "wireless." .. iface .. ".ssid", ssid },
+  }
+  if en and #key >= 8 then
+    sets[#sets + 1] = { "wireless." .. iface .. ".encryption", "psk2" }
+    sets[#sets + 1] = { "wireless." .. iface .. ".key", key }
+  end
+  for _, s in ipairs(sets) do
+    if not uci_set(s[1], s[2]) then
+      return false, "не удалось применить " .. s[1]
+    end
   end
   os.execute("uci commit wireless")
-  os.execute("(sleep 2; /sbin/wifi reload) >/dev/null 2>&1 &")
+  -- в фоне: ответ должен уйти раньше, чем перезапустится Wi-Fi
+  os.execute("(sleep 1; /sbin/wifi reload) >/dev/null 2>&1 &")
   return true, "ok"
 end
 
@@ -901,8 +963,9 @@ small.mut{color:var(--mut)}
           <div class="field"><label>Пароль WPA2</label><input id="w-key" type="password" maxlength="63"></div>
           <div class="field"><label>Канал</label><input id="w-channel" type="number" min="1" max="13" style="width:95px"></div>
         </div>
-        <div style="margin-top:12px"><button class="btn primary" onclick="saveWifi()">Применить</button></div>
-        <small class="mut">Пароль от 8 до 63 символов. При применении Wi-Fi перезагрузится, клиенты отключатся.</small>
+        <div style="margin-top:12px"><button class="btn primary" onclick="saveWifi()">Применить</button>
+          <button class="btn" onclick="loadWifi()">Обновить</button></div>
+        <small class="mut">Пароль от 8 до 63 символов. Если Wi-Fi ещё не настроен, панель создаст точку доступа автоматически. При применении Wi-Fi перезагрузится, клиенты отключатся.</small>
       </div>
       <div class="card"><h3>Состояние</h3><div id="wifi-state">…</div></div>
     </div>
@@ -1120,16 +1183,27 @@ function buildExamples(){const box=document.getElementById("cmd-examples");if(!b
 async function killProc(pid){if(!confirm("Убить процесс "+pid+"?"))return;const r=await post("killproc",{pid});alert(r&&r.ok?"Процесс убит":((r&&r.error)||"ошибка"))}
 // ---------- wifi ----------
 function wmsg(text,ok){const m=document.getElementById("wifi-msg");m.className="msg "+(ok?"ok":"err");m.textContent=text;setTimeout(()=>{m.className="msg"},5000)}
-async function loadWifi(){const w=await api("wifi_get");if(!w||w.error)return;document.getElementById("w-enabled").value=w.enabled?"1":"0";document.getElementById("w-ssid").value=w.ssid;document.getElementById("w-key").value=w.key||"";document.getElementById("w-channel").value=w.channel||11;
- const inf=w.info||{};document.getElementById("wifi-state").innerHTML=
-  `<div class="kv"><span>SSID</span><b>${E(inf.essid||"—")}</b></div>
+let WIFI_POLL=null;
+async function loadWifi(){const w=await api("wifi_get");if(!w||w.error){wmsg((w&&w.error)||"ошибка чтения Wi-Fi",false);return}
+ document.getElementById("w-enabled").value=w.enabled?"1":"0";
+ document.getElementById("w-ssid").value=w.ssid||"";
+ document.getElementById("w-key").value=w.key||"";
+ document.getElementById("w-channel").value=w.channel||11;
+ const inf=w.info||{};
+ const rows=`<div class="kv"><span>SSID</span><b>${E(inf.essid||"—")}</b></div>
    <div class="kv"><span>Режим</span><b>${E(inf.mode||"—")}</b></div>
    <div class="kv"><span>Канал</span><b>${inf.channel||"—"}</b></div>
    <div class="kv"><span>Мощность</span><b>${inf.txpower||"—"} dBm</b></div>
    <div class="kv"><span>Клиентов</span><b>${inf.clients||0}</b></div>
-   ${(inf.stations||[]).map(s=>`<div class="kv"><span class="mono">${E(s.mac)}</span><b>${s.signal} dBm</b></div>`).join("")}`}
-async function saveWifi(){const d={enabled:document.getElementById("w-enabled").value,ssid:document.getElementById("w-ssid").value,key:document.getElementById("w-key").value,channel:document.getElementById("w-channel").value};const r=await post("wifi_set",d);wmsg(r&&r.ok?"Wi-Fi применяется (2-3 секунды)":((r&&r.error)||"ошибка"),r&&r.ok);setTimeout(loadWifi,4000)}
-// ---------- logs ----------
+   ${(inf.stations||[]).map(s=>`<div class="kv"><span class="mono">${E(s.mac)}</span><b>${s.signal} dBm</b></div>`).join("")}`;
+ document.getElementById("wifi-state").innerHTML=(w.present===false?'<div class="msg err" style="margin-bottom:8px">Wi-Fi ещё не настроен — заполни поля и нажми «Применить».</div>':'')+rows;
+}
+async function saveWifi(){
+ const d={enabled:document.getElementById("w-enabled").value,ssid:document.getElementById("w-ssid").value,key:document.getElementById("w-key").value,channel:document.getElementById("w-channel").value};
+ const r=await post("wifi_set",d);
+ wmsg(r&&r.ok?"Wi-Fi применяется (2-5 секунд)":((r&&r.error)||"ошибка"),r&&r.ok);
+ if(r&&r.ok){if(WIFI_POLL)clearInterval(WIFI_POLL);let n=0;WIFI_POLL=setInterval(()=>{n++;loadWifi();if(n>=3){clearInterval(WIFI_POLL);WIFI_POLL=null}},2000)}
+}// ---------- logs ----------
 async function loadLogs(){const f=document.getElementById("log-filter").value.trim();const r=await api("logs",{filter:f});const o=document.getElementById("logs-out");if(!r||r.error){o.textContent=(r&&r.error)||"ошибка";return}o.textContent=(r.lines||"").trim()||"пусто"}
 setInterval(()=>{if(TAB==="logs"&&document.getElementById("log-auto")&&document.getElementById("log-auto").checked)loadLogs()},5000);
 // ---------- backup ----------
