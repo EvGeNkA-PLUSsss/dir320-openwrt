@@ -1,0 +1,1086 @@
+#!/bin/sh
+# =====================================================================
+#  DIR-320 / OpenWrt — УНИВЕРСАЛЬНЫЙ установщик с псевдо-GUI
+#  Один файл: установка сайта+панели+FTP+Wi-Fi, настройки,
+#  универсальная очистка неиспользуемого (пакеты по графу зависимостей,
+#  файлы без владельца, пустые каталоги) + экспертный режим.
+#
+#  Запуск на роутере от root:  sh dir320-tui.sh
+#  Неинтерактивные режимы: --status | --detect | --install-auto
+# =====================================================================
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+TAB=$(printf '\t')
+
+VERSION="2.1.0"
+SITE=/srv/www
+PANEL_CONSOLE=/usr/libexec/panel-console.sh
+FTPSRV=/usr/sbin/vsftpd
+MARK_EOF="__DIR320_PAYLOAD_EOF__"
+
+# ---------------------------------------------------------------------
+#  Терминал / псевдо-GUI
+# ---------------------------------------------------------------------
+ESC=$(printf '\033')
+PLAIN=0
+[ -t 1 ] || PLAIN=1
+[ -n "$DIR320_PLAIN" ] && PLAIN=1
+[ -n "$DIR320_FORCE_TTY" ] && PLAIN=0
+[ "$TERM" = "dumb" ] && PLAIN=1
+
+if [ "$PLAIN" = "1" ]; then
+    C_RESET=; C_FG=; C_BG=; C_ACC=; C_OK=; C_BAD=; C_WARN=; C_DIM=; C_BOLD=
+    ROW_W=78
+else
+    C_RESET="$ESC[0m"
+    C_FG="$ESC[38;5;252m"
+    C_BG="$ESC[48;5;234m"
+    C_ACC="$ESC[38;5;45m"
+    C_OK="$ESC[38;5;82m"
+    C_BAD="$ESC[38;5;203m"
+    C_WARN="$ESC[38;5;214m"
+    C_DIM="$ESC[38;5;244m"
+    C_BOLD="$ESC[1m"
+    ROW_W=78
+fi
+
+TERM_R=30
+TERM_C=80
+
+ui_calc() {
+    if [ -t 1 ]; then
+        sz=$(stty size 2>/dev/null)
+        if [ -n "$sz" ]; then
+            set -- $sz
+            TERM_R=$1
+            TERM_C=$2
+            [ "$TERM_R" -lt 20 ] && TERM_R=20
+            [ "$TERM_C" -lt 70 ] && TERM_C=70
+        fi
+    fi
+    ROW_W=$((TERM_C - 2))
+}
+
+ui_show_cursor() { [ "$PLAIN" = "1" ] || printf '%s' "$ESC[?25h"; }
+ui_hide_cursor() { [ "$PLAIN" = "1" ] || printf '%s' "$ESC[?25l"; }
+ui_clear()  { ui_show_cursor; [ "$PLAIN" = "1" ] && { printf '\n\n'; return; }; printf '%s[2J%s[H' "$ESC" "$ESC"; }
+ui_reset()  { printf '%s' "$C_RESET"; }
+
+ui_at() { # row col text
+    r=$1; c=$2; t=$3
+    if [ "$PLAIN" = "1" ]; then
+        printf '%s\n' "$t"
+    else
+        printf '%s[%d;%dH%s%s%s' "$ESC" "$r" "$c" "$C_BG$C_FG" "$t" "$C_RESET"
+    fi
+}
+
+ui_fill_bg() { # заливка фона символами
+    [ "$PLAIN" = "1" ] && return 0
+    r=1
+    line=""
+    i=0
+    while [ $i -lt "$TERM_C" ]; do
+        line="$line░"
+        i=$((i + 1))
+    done
+    while [ $r -le "$TERM_R" ]; do
+        printf '%s[%d;1H%s%s%s' "$ESC" "$r" "$C_DIM$C_BG" "$line" "$C_RESET"
+        r=$((r + 1))
+    done
+}
+
+ui_box() { # row col width height title
+    r=$1; c=$2; w=$3; h=$4; title=$5
+    if [ "$PLAIN" = "1" ]; then
+        printf '+%s+\n' "$(printf '%*s' $((w - 2)) '' | tr ' ' '-')"
+        [ -n "$title" ] && printf '| %-*s|\n' $((w - 4)) "$title"
+        return 0
+    fi
+    i=$((c + 1)); end=$((c + w - 2))
+    top="+"
+    while [ $i -le $end ]; do top="$top-"; i=$((i + 1)); done
+    top="$top+"
+    ui_at "$r" "$c" "$top"
+    y=$((r + 1))
+    inner=""
+    i=0
+    while [ $i -lt $((w - 2)) ]; do inner="$inner "; i=$((i + 1)); done
+    while [ $y -lt $((r + h - 1)) ]; do
+        ui_at "$y" "$c" "|$inner|"
+        y=$((y + 1))
+    done
+    bot="+"
+    i=1
+    while [ $i -lt $((w - 1)) ]; do bot="$bot-"; i=$((i + 1)); done
+    bot="$bot+"
+    ui_at "$y" "$c" "$bot"
+    if [ -n "$title" ]; then
+        ui_at "$r" $((c + 2)) " $title "
+    fi
+}
+ui_box_line() { # row col width text [color]
+    r=$1; c=$2; w=$3; t=$4; col=${5:-$C_FG}
+    if [ "$PLAIN" = "1" ]; then
+        printf '| %s\n' "$t"
+    else
+        ui_at "$r" $((c + 2)) "$col$t$C_RESET"
+    fi
+}
+ui_hline() { # row col width char
+    r=$1; c=$2; w=$3; ch=${4:-=}
+    [ "$PLAIN" = "1" ] && { printf '%s\n' "$(printf '%*s' $((w - 2)) '' | tr ' ' "$ch")"; return; }
+    line=""
+    i=1
+    while [ $i -lt $((w - 1)) ]; do line="$line$ch"; i=$((i + 1)); done
+    ui_at "$r" "$c" "$line"
+}
+ui_center() { # row text [color]
+    r=$1; t=$2; col=${3:-$C_FG}
+    if [ "$PLAIN" = "1" ]; then printf '%s\n' "$t"; return; fi
+    c=$(( (TERM_C - ${#t}) / 2 + 1 ))
+    [ $c -lt 1 ] && c=1
+    ui_at "$r" "$c" "$col$t$C_RESET"
+}
+ui_prompt() { # row text
+    r=$1; t=$2
+    if [ "$PLAIN" = "1" ]; then printf '%s ' "$t"; else ui_at "$r" 3 "$C_ACC$t$C_RESET"; fi
+}
+ui_msg() { # text [ok|err|warn]
+    t=$1; kind=${2:-}
+    case "$kind" in
+        ok) [ "$PLAIN" = "1" ] && echo "[OK] $t" || ui_center $((TERM_R - 2)) "$t" "$C_OK" ;;
+        err) [ "$PLAIN" = "1" ] && echo "[ERR] $t" || ui_center $((TERM_R - 2)) "$t" "$C_BAD" ;;
+        warn) [ "$PLAIN" = "1" ] && echo "[!] $t" || ui_center $((TERM_R - 2)) "$t" "$C_WARN" ;;
+        *) [ "$PLAIN" = "1" ] && echo "$t" || ui_center $((TERM_R - 2)) "$t" ;;
+    esac
+}
+ui_pause() {
+    if [ "$PLAIN" = "1" ]; then printf '\n-- Enter --\n'; read _x; else
+        ui_prompt $((TERM_R - 1)) "  Нажми Enter… "
+        read _x
+    fi
+}
+
+# ---------------------------------------------------------------------
+#  Встроенные файлы панели
+# ---------------------------------------------------------------------
+write_payloads() {
+    mkdir -p "$SITE/cgi-bin" "$SITE/admin" /usr/libexec /root
+    cat > "$SITE/cgi-bin/admin" <<'__PANEL_ADMIN_EOF__'
+@@ADMIN_LUA@@
+__PANEL_ADMIN_EOF__
+    cat > "$PANEL_CONSOLE" <<'__PANEL_CONSOLE_EOF__'
+@@PANEL_CONSOLE@@
+__PANEL_CONSOLE_EOF__
+    cat > "$SITE/admin/index.html" <<'__PANEL_AINDEX_EOF__'
+@@ADMIN_INDEX@@
+__PANEL_AINDEX_EOF__
+    cat > "$SITE/index.html" <<'__PANEL_SITE_EOF__'
+@@SITE_INDEX@@
+__PANEL_SITE_EOF__
+    cat > /root/README-DIR320.txt <<'__PANEL_README_EOF__'
+@@README@@
+__PANEL_README_EOF__
+    chmod 755 "$SITE/cgi-bin/admin" "$PANEL_CONSOLE"
+    chmod 644 "$SITE/admin/index.html" "$SITE/index.html"
+    chown -R 1000:1000 "$SITE" 2>/dev/null
+}
+
+# ---------------------------------------------------------------------
+#  Утилиты
+# ---------------------------------------------------------------------
+readone() { # prompt default
+    p=$1; d=$2
+    printf '%s' "$p"
+    [ -n "$d" ] && printf ' [%s]' "$d"
+    printf ': '
+    read ans
+    [ -z "$ans" ] && ans=$d
+    printf '%s' "$ans"
+}
+have() { command -v "$1" >/dev/null 2>&1; }
+kv() { printf '%s\n' "$1"; }
+free_kb() { df -k /overlay 2>/dev/null | awk 'NR==2{print $4}'; }
+ram_kb() { awk '/MemAvailable/{print $2}' /proc/meminfo 2>/dev/null; }
+ram_used_mb() { awk '/MemTotal:/{t=$2}/MemAvailable:/{a=$2}END{if(t>0)printf "%d",(t-a)/1024}' /proc/meminfo 2>/dev/null; }
+lan_ip() { ip -4 addr show 2>/dev/null | awk '/^[0-9]+: /{iface=$2; sub(":","",iface)} /inet /{ if (iface == "lo") next; split($2,a,"/"); print a[1]; exit }'; }
+all_ips() { ip -4 addr show 2>/dev/null | awk '/^[0-9]+: /{iface=$2; sub(":","",iface)} /inet /{split($2,a,"/"); printf "%s=%s ", iface, a[1]}' ; }
+model_name() { cat /tmp/sysinfo/model 2>/dev/null || cat /proc/device-tree/model 2>/dev/null | tr -d '\0'; }
+owrt_ver() { sed -n "s/^DISTRIB_DESCRIPTION='\(.*\)'/\1/p" /etc/openwrt_release 2>/dev/null; }
+port_open() { netstat -tln 2>/dev/null | grep -q ":$1 "; }
+svc_running() { ps 2>/dev/null | grep -q "[${1:0:1}]${1#?}"; }
+
+# ---------------------------------------------------------------------
+#  Пакеты: граф зависимостей, overlay-размер, защита
+# ---------------------------------------------------------------------
+PKG_TMP=/tmp/.dir320_pkgs
+PKG_REQ=/tmp/.dir320_req
+PKG_PROT=/tmp/.dir320_prot
+PKG_OV=/tmp/.dir320_pkg_ov
+PKG_LEAVES=/tmp/.dir320_leaves
+SIZES=/tmp/.dir320_sizes
+OWNER=/tmp/.dir320_owner
+FILE_CAND=/tmp/.dir320_files
+
+# Один проход по overlay: размеры всех файлов (busybox find без -printf)
+scan_sizes() {
+    find /overlay/upper -type f -exec wc -c {} + 2>/dev/null | awk '
+        / total$/ { next }
+        { sz = $1; sub(/^ *[0-9]+ +/, "", $0); print sz "\t" $0 }
+    ' > "$SIZES"
+}
+
+# Один проход по control-файлам + join с размерами overlay + обязательные/защищённые
+scan_pkgs() {
+    awk '
+        FNR == 1 {
+            if (name != "") printf "%s\t%d\t%s\t%s\n", name, size, deps, desc
+            name = ""; size = 0; deps = ""; desc = ""
+        }
+        /^Package: /        { name = substr($0, 10) }
+        /^Installed-Size: / { size = substr($0, 17) + 0 }
+        /^Depends: /        { deps = substr($0, 10) }
+        /^Description: /    { d = substr($0, 14); gsub(/^ +/, "", d); if (length(d) > 60) d = substr(d, 1, 60) "…"; desc = d }
+        END { if (name != "") printf "%s\t%d\t%s\t%s\n", name, size, deps, desc }
+    ' /usr/lib/opkg/info/*.control > "$PKG_TMP"
+
+    awk -F"	" '{ n = split($3, a, ","); for (i = 1; i <= n; i++) { d = a[i]; sub(/\(.*/, "", d); gsub(/ /, "", d); if (d != "") print d } }' "$PKG_TMP" | sort -u > "$PKG_REQ"
+
+    awk '{ f = FILENAME; sub(/.*\//, "", f); sub(/\.list$/, "", f); print $0 "\t" f }' /usr/lib/opkg/info/*.list > "$OWNER"
+
+    awk -F"	" '
+        NR == FNR { p = $2; sub("^/overlay/upper", "", p); sz[p] = $1; next }
+        ($1 in sz) { sum[$2] += sz[$1] }
+        END { for (k in sum) print k "\t" sum[k] }
+    ' "$SIZES" "$OWNER" > "$PKG_OV"
+
+    cat > "$PKG_PROT" <<'EOF_PROT'
+base-files
+busybox
+kernel
+libc
+libgcc1
+libgcc
+libpthread
+librt
+logd
+procd
+ubus
+ubusd
+uci
+netifd
+fstools
+mtd
+jshn
+jsonfilter
+libubox20191228
+libubus20210603
+libuci20130104
+libjson-c2
+libblobmsg-json
+libjson-script
+libnl-tiny
+uclient-fetch
+libuclient20160123
+usign
+getrandom
+urngd
+urandom-seed
+firewall
+iptables
+ip6tables
+libip4tc2
+libip6tc2
+libxtables12
+dnsmasq
+dropbear
+uhttpd
+rpcd
+vsftpd
+wireless-regdb
+wpad-mini
+hostapd-common
+iw
+iwinfo
+swconfig
+kmod-rt2800-soc
+kmod-rt2800-mmio
+kmod-rt2800-lib
+kmod-rt2x00-soc
+kmod-rt2x00-mmio
+kmod-rt2x00-lib
+kmod-mac80211
+kmod-cfg80211
+kmod-nf-conntrack
+kmod-nf-conntrack6
+kmod-nf-flow
+kmod-nf-nat
+kmod-nf-ipt
+kmod-nf-ipt6
+kmod-nf-reject
+kmod-nf-reject6
+kmod-ipt-core
+kmod-ipt-conntrack
+kmod-ipt-nat
+kmod-ipt-offload
+kmod-gpio-button-hotplug
+kmod-leds-gpio
+kmod-slhc
+kmod-ppp
+kmod-pppoe
+kmod-pppox
+luci-base
+luci-mod-admin-full
+luci-mod-status
+luci-mod-system
+luci-mod-network
+luci-lib-nixio
+luci-lib-ip
+luci-lib-jsonc
+luci-proto-ppp
+liblua5.1.5
+liblucihttp0
+liblucihttp-lua
+libpcre
+EOF_PROT
+
+    ls -l /proc/[0-9]*/exe 2>/dev/null | awk -F' -> ' '{print $2}' > /tmp/.dir320_need
+    ls -l /etc/rc.d/S* 2>/dev/null | awk -F' -> ' '{print $2}' | sed 's#^\.\./#/etc/#' >> /tmp/.dir320_need
+    awk -F"	" 'NR == FNR { need[$1] = 1; next } ($1 in need) { print $2 }' /tmp/.dir320_need "$OWNER" >> "$PKG_PROT"
+    rm -f /tmp/.dir320_need
+    sort -u "$PKG_PROT" > "$PKG_PROT.u" && mv "$PKG_PROT.u" "$PKG_PROT"
+
+    if [ -s "$PKG_OV" ] && [ -s "$PKG_TMP" ]; then
+        awk -F"	" '
+            NR == FNR { ov[$1] = $2; next }
+            { print $0 "\t" (ov[$1] + 0) }
+        ' "$PKG_OV" "$PKG_TMP" > "$PKG_TMP.o" && mv "$PKG_TMP.o" "$PKG_TMP"
+    else
+        awk '{ print $0 "\t0" }' "$PKG_TMP" > "$PKG_TMP.o" && mv "$PKG_TMP.o" "$PKG_TMP"
+    fi
+}
+
+pkg_is_protected() { grep -qxF "$1" "$PKG_PROT" 2>/dev/null; }
+
+pkg_leaf_list() {
+    scan_sizes
+    scan_pkgs
+    : > /tmp/.dir320_sets
+    awk '{ print "P\t" $0 }' "$PKG_PROT" >> /tmp/.dir320_sets
+    awk '{ print "R\t" $0 }' "$PKG_REQ" >> /tmp/.dir320_sets
+    : > "$PKG_LEAVES"
+    awk -F"	" '
+        NR == FNR { set[$1 "\t" $2] = 1; next }
+        !(("R\t" $1) in set) {
+            prot = (("P\t" $1) in set) ? 1 : 0
+            if ($1 ~ /^luci/ || $1 ~ /^rpcd/) prot = 1
+            print $1 "\t" $5 "\t" $2 "\t" $4 "\t" prot
+        }
+    ' /tmp/.dir320_sets "$PKG_TMP" > "$PKG_LEAVES"
+    sort -t "	" -k2 -nr "$PKG_LEAVES" > "$PKG_LEAVES.s" 2>/dev/null && mv "$PKG_LEAVES.s" "$PKG_LEAVES"
+    rm -f /tmp/.dir320_sets
+}
+
+file_scan() { # $1=1 включает /etc (эксперт)
+    incl=${1:-0}
+    : > "$FILE_CAND"
+    [ -d /overlay/upper ] || return 0
+    awk -F"	" -v incl="$incl" '
+        NR == FNR { own[$1] = 1; next }
+        {
+            rel = $2
+            sub("^/overlay/upper", "", rel)
+            if (rel ~ /^\/(srv|root)\//) next
+            if (rel ~ /^\/usr\/lib\/opkg\//) next
+            if (rel == "/usr/libexec/panel-console.sh") next
+            if (incl != 1 && rel ~ /^\/etc\//) next
+            if (rel in own) next
+            if ($1 < 4096) next
+            print rel "\t" $1
+        }
+    ' "$OWNER" "$SIZES" > "$FILE_CAND"
+    sort -t "	" -k2 -nr "$FILE_CAND" > "$FILE_CAND.s" 2>/dev/null && mv "$FILE_CAND.s" "$FILE_CAND"
+}
+
+# Удаление пустых каталогов в overlay
+cleanup_empty_dirs() {
+    removed=0
+    find /overlay/upper -type d 2>/dev/null | sort -r | while read -r d; do
+        case "$d" in
+            /overlay/upper|/overlay/upper/srv|/overlay/upper/srv/*|/overlay/upper/root|/overlay/upper/root/*) continue ;;
+            /overlay/upper/usr|/overlay/upper/lib|/overlay/upper/bin|/overlay/upper/sbin|/overlay/upper/etc|/overlay/upper/www|/overlay/upper/mnt|/overlay/upper/dev|/overlay/upper/proc|/overlay/upper/sys|/overlay/upper/tmp|/overlay/upper/var|/overlay/upper/rom) continue ;;
+        esac
+        if rmdir "$d" 2>/dev/null; then
+            echo "  удалён пустой каталог: ${d#/overlay/upper}"
+            removed=$((removed + 1))
+        fi
+    done
+    echo "  готово"
+}
+
+human_kb() { # bytes -> text
+    b=$1
+    [ "$b" -lt 1024 ] && { echo "${b} Б"; return; }
+    kb=$((b / 1024))
+    [ "$kb" -lt 1024 ] && { echo "${kb} КБ"; return; }
+    printf '%s.%s МБ' $((kb / 1024)) $(((kb % 1024) * 10 / 1024))
+}
+
+# ---------------------------------------------------------------------
+#  Установка
+# ---------------------------------------------------------------------
+ftp_hash() { # password -> md5-crypt hash via lua/nixio, иначе пусто
+    salt=$(hexdump -v -n 4 -e '/1 "%02x"' /dev/urandom 2>/dev/null)
+    [ -z "$salt" ] && salt=Ab12Cd34
+    P="$1" S="$salt" lua -e 'local n=require"nixio"; print(n.crypt(os.getenv("P"),"$1$"..os.getenv("S")))' 2>/dev/null
+}
+
+root_hash() { awk -F: '$1=="root"{print $2}' /etc/shadow 2>/dev/null; }
+
+# FTP-пароль = пароль root: копируем хеш root в ftpuser
+sync_ftp_to_root() {
+    rh=$(root_hash)
+    [ -n "$rh" ] || return 1
+    if grep -q '^ftpuser:' /etc/shadow 2>/dev/null; then
+        sed -i "s#^ftpuser:[^:]*:#ftpuser:$rh:#" /etc/shadow
+    else
+        echo "ftpuser:$rh:0:0:99999:7:::" >> /etc/shadow
+    fi
+    chmod 600 /etc/shadow
+    /etc/init.d/vsftpd restart >/dev/null 2>&1 &
+    return 0
+}
+
+# Автосинхронизация FTP-пароля с root (cron каждые 2 минуты)
+install_ftp_sync() {
+    cat > /usr/libexec/dir320-sync-ftp.sh <<'EOF_SYNC'
+#!/bin/sh
+# FTP-пароль всегда как у root. Пишет flash только при расхождении.
+rh=$(awk -F: '$1=="root"{print $2}' /etc/shadow 2>/dev/null)
+ch=$(awk -F: '$1=="ftpuser"{print $2}' /etc/shadow 2>/dev/null)
+[ -n "$rh" ] || exit 0
+[ "$rh" = "$ch" ] && exit 0
+if [ -z "$ch" ]; then
+    echo "ftpuser:$rh:0:0:99999:7:::" >> /etc/shadow
+else
+    sed -i "s#^ftpuser:[^:]*:#ftpuser:$rh:#" /etc/shadow
+fi
+chmod 600 /etc/shadow
+/etc/init.d/vsftpd restart >/dev/null 2>&1 &
+EOF_SYNC
+    chmod 755 /usr/libexec/dir320-sync-ftp.sh
+    mkdir -p /etc/crontabs
+    grep -q 'dir320-sync-ftp' /etc/crontabs/root 2>/dev/null || \
+        echo '*/2 * * * * /usr/libexec/dir320-sync-ftp.sh' >> /etc/crontabs/root
+    /etc/init.d/cron enable >/dev/null 2>&1
+    /etc/init.d/cron restart >/dev/null 2>&1
+}
+
+remove_ftp_sync() {
+    rm -f /usr/libexec/dir320-sync-ftp.sh
+    sed -i '/dir320-sync-ftp/d' /etc/crontabs/root 2>/dev/null
+    /etc/init.d/cron restart >/dev/null 2>&1
+}
+
+ensure_vsftpd() {
+    [ -x "$FTPSRV" ] && return 0
+    echo "  Устанавливаю vsftpd…"
+    sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
+    opkg update >/tmp/dir320-opkg.log 2>&1
+    opkg install vsftpd >>/tmp/dir320-opkg.log 2>&1
+    [ -x "$FTPSRV" ] && return 0
+    rel=$(sed -n "s/^DISTRIB_RELEASE='\(.*\)'/\1/p" /etc/openwrt_release)
+    arch=$(sed -n "s/^DISTRIB_ARCH='\(.*\)'/\1/p" /etc/openwrt_release)
+    if [ "$rel" = "19.07.10" ] && [ "$arch" = "mipsel_24kc" ]; then
+        uclient-fetch -q -O /tmp/vsftpd.ipk http://downloads.openwrt.org/releases/19.07.10/packages/mipsel_24kc/packages/vsftpd_3.0.3-3_mipsel_24kc.ipk >/dev/null 2>&1 \
+            && opkg install --nodeps /tmp/vsftpd.ipk >>/tmp/dir320-opkg.log 2>&1
+    fi
+    [ -x "$FTPSRV" ]
+}
+
+apply_uhttpd() { # site_port luci_port
+    uci -q delete uhttpd.site 2>/dev/null
+    uci set uhttpd.site=uhttpd
+    uci set uhttpd.site.listen_http="0.0.0.0:$1"
+    uci add_list uhttpd.site.listen_http="[::]:$1"
+    uci set uhttpd.site.home="$SITE"
+    uci set uhttpd.site.cgi_prefix='/cgi-bin'
+    uci set uhttpd.site.script_timeout='0'
+    uci set uhttpd.site.rfc1918_filter='1'
+    uci set uhttpd.site.max_requests='3'
+    uci set uhttpd.site.max_connections='100'
+    uci -q delete uhttpd.main.listen_http 2>/dev/null
+    uci set uhttpd.main.listen_http="0.0.0.0:$2"
+    uci add_list uhttpd.main.listen_http="[::]:$2"
+    uci set uhttpd.main.redirect_https='0'
+    uci commit uhttpd
+}
+
+apply_firewall() { # site luci ftp
+    mkrule() {
+        uci -q delete firewall."$1" 2>/dev/null
+        uci set firewall."$1"=rule
+        uci set firewall."$1".name="$1"
+        uci set firewall."$1".src='wan'
+        uci set firewall."$1".proto='tcp'
+        uci set firewall."$1".dest_port="$2"
+        uci set firewall."$1".target='ACCEPT'
+    }
+    mkrule Allow_Site_"$1" "$1"
+    mkrule Allow_LuCI_"$2" "$2"
+    mkrule Allow_FTP_"$3" "$3"
+    mkrule Allow_FTP_Pasv '50000-50100'
+    uci commit firewall
+}
+
+apply_ftp() { # user hash port
+    u=$1; h=$2; p=$3
+    grep -q "^$u:" /etc/passwd 2>/dev/null || echo "$u:x:1000:1000:FTP User:$SITE:/bin/false" >> /etc/passwd
+    sed -i "s#^\($u:[^:]*:[^:]*:[^:]*:[^:]*\):[^:]*:#\1:$SITE:#" /etc/passwd 2>/dev/null
+    grep -q "^$u:" /etc/shadow 2>/dev/null || echo "$u:$h:0:0:99999:7:::" >> /etc/shadow
+    sed -i "s#^\($u:\)[^:]*:#\1$h:#" /etc/shadow 2>/dev/null
+    grep -q "^$u:" /etc/group 2>/dev/null || echo "$u:x:1000:" >> /etc/group
+    mkdir -p /var/run/vsftpd/empty
+    cat > /etc/vsftpd.conf <<EOF
+background=NO
+listen=YES
+listen_ipv6=NO
+listen_port=$p
+anonymous_enable=NO
+local_enable=YES
+write_enable=YES
+local_umask=022
+check_shell=NO
+session_support=NO
+connect_from_port_20=NO
+chroot_local_user=YES
+allow_writeable_chroot=YES
+secure_chroot_dir=/var/run/vsftpd/empty
+pasv_enable=YES
+pasv_min_port=50000
+pasv_max_port=50100
+seccomp_sandbox=NO
+ftpd_banner=DIR-320 FTP (site files)
+EOF
+    cat > /etc/init.d/vsftpd <<'EOF'
+#!/bin/sh /etc/rc.common
+START=50
+USE_PROCD=1
+
+start_service() {
+    mkdir -p /var/run/vsftpd/empty
+    procd_open_instance
+    procd_set_param command /usr/sbin/vsftpd
+    procd_set_param respawn
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+    procd_close_instance
+}
+
+service_triggers() {
+    procd_add_reload_trigger "vsftpd"
+}
+EOF
+    chmod 755 /etc/init.d/vsftpd
+    /etc/init.d/vsftpd enable >/dev/null 2>&1
+    /etc/init.d/vsftpd restart >/dev/null 2>&1
+    chown -R 1000:1000 "$SITE" 2>/dev/null
+}
+
+apply_wifi() { # ssid pass ch
+    uci set wireless.radio0.disabled='0'
+    uci set wireless.radio0.country='RU'
+    uci set wireless.radio0.channel="$3"
+    uci set wireless.default_radio0.ssid="$1"
+    uci set wireless.default_radio0.encryption='psk2'
+    uci set wireless.default_radio0.key="$2"
+    uci set wireless.default_radio0.network='lan'
+    uci set wireless.default_radio0.mode='ap'
+    uci commit wireless
+    /sbin/wifi reload >/dev/null 2>&1 &
+}
+
+disable_extra() {
+    /etc/init.d/odhcpd disable >/dev/null 2>&1; /etc/init.d/odhcpd stop >/dev/null 2>&1
+    /etc/init.d/cron disable >/dev/null 2>&1; /etc/init.d/cron stop >/dev/null 2>&1
+    uci -q set network.wan6.disabled='1' 2>/dev/null; uci -q commit network 2>/dev/null
+    for f in /etc/rc.d/*; do [ -e "$f" ] || rm -f "$f"; done
+}
+
+do_install() { # ssid wpass ch ftpuser ftppass ftpport siteport luciport
+    ssid=$1; wp=$2; ch=$3; fu=$4; fp=$5; ftpp=$6; sp=$7; lp=$8
+    echo
+    echo "  [1/7] файлы панели…"
+    write_payloads
+    echo "  [2/7] отключаю неиспользуемые службы…"
+    disable_extra
+    echo "  [3/7] FTP…"
+    if ensure_vsftpd; then
+        if [ "$FTP_SAME_ROOT" = "1" ]; then
+            h=$(root_hash)
+            echo "    FTP-пароль = пароль root"
+        else
+            h=$(ftp_hash "$fp")
+        fi
+        if [ -n "$h" ]; then
+            apply_ftp "$fu" "$h" "$ftpp"
+            if [ "$FTP_SAME_ROOT" = "1" ]; then install_ftp_sync; fi
+        else
+            echo "    !! не удалось создать пароль (нет lua/nixio)"
+        fi
+    else
+        echo "    !! vsftpd не установлен (нужен интернет на роутере)"
+    fi
+    echo "  [4/7] веб-сервер и панель…"
+    apply_uhttpd "$sp" "$lp"
+    echo "  [5/7] Wi-Fi…"
+    apply_wifi "$ssid" "$wp" "$ch"
+    echo "  [6/7] firewall…"
+    apply_firewall "$sp" "$lp" "$ftpp"
+    echo "  [7/7] перезапуск…"
+    /etc/init.d/uhttpd restart >/dev/null 2>&1
+    /etc/init.d/vsftpd restart >/dev/null 2>&1
+    /etc/init.d/firewall reload >/dev/null 2>&1
+    sleep 2
+    echo
+    echo "  Готово:"
+    echo "    сайт    http://$(lan_ip)/"
+    echo "    панель  http://$(lan_ip)/admin"
+    echo "    LuCI    http://$(lan_ip):$lp/"
+    echo "    FTP     ftp://$(lan_ip)/  ($fu)"
+    echo "    Wi-Fi   $ssid"
+    sync
+}
+
+# ---------------------------------------------------------------------
+#  Статус
+# ---------------------------------------------------------------------
+show_status() {
+    ui_clear
+    if [ "$PLAIN" = "1" ]; then
+        echo "=== DIR-320 · статус ==="
+        echo "модель:    $(model_name)"
+        echo "OpenWrt:   $(owrt_ver)"
+        echo "ядро:      $(uname -r)"
+        echo "uptime:    $(uptime | sed 's/.*up //;s/,.*//')"
+        echo "флеш:      $(df -h /overlay 2>/dev/null | awk 'NR==2{print $4" свободно из "$2}')"
+        echo "RAM:       $(ram_used_mb) МБ занято, $(( $(ram_kb) / 1024 )) МБ свободно"
+        echo "пакеты:    $(ls /usr/lib/opkg/info/*.control 2>/dev/null | wc -l)"
+        echo "порты:    80:$(port_open 80 && echo open || echo closed) 8080:$(port_open 8080 && echo open || echo closed) 21:$(port_open 21 && echo open || echo closed)"
+        echo "Wi-Fi:     $(iwinfo wlan0 info 2>/dev/null | sed -n '1s/.*ESSID: //p')"
+        echo "FTP-корень:$(grep '^ftpuser:' /etc/passwd 2>/dev/null | cut -d: -f6)"
+echo "IP:        $(all_ips)"
+    else
+        ui_fill_bg
+        ui_box 2 2 "$ROW_W" 20 "СИСТЕМА"
+        i=3
+        ui_box_line $i 2 "$ROW_W" "Модель:      $(model_name)"; i=$((i + 1))
+        ui_box_line $i 2 "$ROW_W" "OpenWrt:     $(owrt_ver)"; i=$((i + 1))
+        ui_box_line $i 2 "$ROW_W" "Ядро:        $(uname -r)"; i=$((i + 1))
+        ui_box_line $i 2 "$ROW_W" "Uptime:      $(uptime | sed 's/.*up //;s/,.*//')"; i=$((i + 1))
+        ui_box_line $i 2 "$ROW_W" "Флеш:        $(df -h /overlay 2>/dev/null | awk 'NR==2{print $4" свободно из "$2}')"; i=$((i + 1))
+        ui_box_line $i 2 "$ROW_W" "RAM:         $(ram_used_mb) МБ занято / $(( $(ram_kb) / 1024 )) МБ свободно"; i=$((i + 1))
+        ui_box_line $i 2 "$ROW_W" "Пакетов:     $(ls /usr/lib/opkg/info/*.control 2>/dev/null | wc -l)"; i=$((i + 1))
+        ui_box_line $i 2 "$ROW_W" "Порты:       80:$(port_open 80 && echo open || echo closed)  8080:$(port_open 8080 && echo open || echo closed)  FTP:21:$(port_open 21 && echo open || echo closed)"; i=$((i + 1))
+        ui_box_line $i 2 "$ROW_W" "Wi-Fi:       $(iwinfo wlan0 info 2>/dev/null | sed -n '1s/.*ESSID: //p')"; i=$((i + 1))
+        ui_box_line $i 2 "$ROW_W" "FTP-корень:  $(grep '^ftpuser:' /etc/passwd 2>/dev/null | cut -d: -f6)"; i=$((i + 1))
+ui_box_line $i 2 "$ROW_W" "IP:          $(all_ips)"; i=$((i + 1))
+        ui_prompt $((TERM_R - 1)) "  Enter — назад "
+    fi
+    read _x
+}
+
+# ---------------------------------------------------------------------
+#  Универсальная очистка
+# ---------------------------------------------------------------------
+CL_ITEMS=/tmp/.dir320_cl_items
+CL_SEL=/tmp/.dir320_cl_sel
+CL_EXPERT=/tmp/.dir320_cl_expert
+CL_PAGE=0
+
+cleanup_collect() { # expert 0/1
+    expert=$1
+    : > "$CL_ITEMS"
+    pkg_leaf_list
+    idx=0
+    while IFS="$TAB" read -r n ov ins desc prot; do
+        [ -z "$n" ] && continue
+        [ "$prot" = "1" ] && [ "$expert" != "1" ] && continue
+        idx=$((idx + 1))
+        kind="pkg"
+        flag="ROM"
+        [ "$ov" -gt 0 ] && flag="OVL"
+        [ "$prot" = "1" ] && flag="SYS"
+        printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$idx" "$kind" "$n" "$ov" "$flag" "$desc" >> "$CL_ITEMS"
+    done < "$PKG_LEAVES"
+    file_scan "$expert"
+    while IFS="$TAB" read -r f sz; do
+        [ -z "$f" ] && continue
+        idx=$((idx + 1))
+        fl="OVL"
+        case "$f" in /etc/*) fl="SYS" ;; esac
+        printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$idx" "file" "$f" "$sz" "$fl" "файл без владельца" >> "$CL_ITEMS"
+    done < "$FILE_CAND"
+    : > "$CL_SEL"
+}
+
+cleanup_total_selected() {
+    tot=0; cnt=0
+    [ -s "$CL_SEL" ] || { echo 0; return; }
+    while read -r i; do
+        line=$(awk -F"$TAB" -v k="$i" '$1==k' "$CL_ITEMS")
+        [ -z "$line" ] && continue
+        sz=$(echo "$line" | cut -f4)
+        tot=$((tot + sz)); cnt=$((cnt + 1))
+    done < "$CL_SEL"
+    echo "$tot"
+}
+
+cleanup_toggle() { # index
+    i=$1
+    if grep -qxF "$i" "$CL_SEL" 2>/dev/null; then
+        grep -vxF "$i" "$CL_SEL" > "$CL_SEL.t" 2>/dev/null; mv "$CL_SEL.t" "$CL_SEL"
+    else
+        echo "$i" >> "$CL_SEL"
+    fi
+    sort -n "$CL_SEL" -o "$CL_SEL" 2>/dev/null
+}
+
+cleanup_select_all() { # mode: all|none|ovl|inv
+    case "$1" in
+        none) : > "$CL_SEL" ;;
+        all) cut -f1 "$CL_ITEMS" > "$CL_SEL" ;;
+        ovl)
+            : > "$CL_SEL"
+            awk -F"$TAB" '$5=="OVL"{print $1}' "$CL_ITEMS" > "$CL_SEL"
+            ;;
+        inv)
+            : > "$CL_SEL.new"
+            while IFS="$TAB" read -r i k n sz flag desc; do
+                grep -qxF "$i" "$CL_SEL" 2>/dev/null || echo "$i" >> "$CL_SEL.new"
+            done < "$CL_ITEMS"
+            mv "$CL_SEL.new" "$CL_SEL"
+            ;;
+    esac
+}
+
+cleanup_apply() {
+    [ -s "$CL_SEL" ] || { ui_msg "Ничего не выбрано" warn; ui_pause; return; }
+    n=$(wc -l < "$CL_SEL")
+    before=$(free_kb)
+    if [ "$PLAIN" = "1" ]; then
+        printf 'Удалить %s элемент(ов)? (yes/no): ' "$n"
+    else
+        ui_prompt $((TERM_R - 1)) "  Удалить $n элемент(ов)? Введи yes для подтверждения: "
+    fi
+    read ok
+    if [ -s "$CL_EXPERT" ]; then
+        [ "$ok" = "YES" ] || { ui_msg "Отменено (в эксперте нужно YES)" warn; ui_pause; return 0; }
+    else
+        [ "$ok" = "yes" ] || return 0
+    fi
+    pkgs=""
+    while read -r i; do
+        line=$(awk -F"$TAB" -v k="$i" '$1==k' "$CL_ITEMS")
+        [ -z "$line" ] && continue
+        kind=$(echo "$line" | cut -f2)
+        name=$(echo "$line" | cut -f3)
+        if [ "$kind" = "pkg" ]; then
+            pkgs="$pkgs $name"
+        else
+            case "$name" in
+                *..*|/etc/*|/srv/*|/root/*) continue ;;
+            esac
+            [ -f "/overlay/upper$name" ] && rm -f "/overlay/upper$name"
+        fi
+    done < "$CL_SEL"
+    # удаляем пакеты разом (быстрее и меньше памяти)
+    if [ -n "$pkgs" ]; then
+        # shellcheck disable=SC2086
+        opkg remove $pkgs >/tmp/.dir320_remove.log 2>&1
+    fi
+    after=$(free_kb)
+    echo
+    echo "  Освобождено: $(( (after - before) / 1024 )) КБ"
+    [ -s /tmp/.dir320_remove.log ] && { echo "  Лог удаления (последние строки):"; tail -n 8 /tmp/.dir320_remove.log | sed 's/^/    /'; }
+    sync
+}
+
+screen_cleanup() {
+    cleanup_collect 0
+    page=0
+    while :; do
+        total=$(wc -l < "$CL_ITEMS" 2>/dev/null || echo 0)
+        pagesz=12
+        [ "$PLAIN" = "1" ] && pagesz=20
+        pages=$(( (total + pagesz - 1) / pagesz ))
+        [ "$pages" -lt 1 ] && pages=1
+        [ "$page" -ge "$pages" ] && page=$((pages - 1))
+        refresh=0
+        if true; then
+            if [ "$PLAIN" != "1" ]; then
+                ui_clear; ui_fill_bg
+                ui_box 1 2 "$ROW_W" 3 "ОЧИСТКА · универсальный анализ"
+                ui_box_line 2 2 "$ROW_W" "Найдено: $total  ·  страница $((page + 1))/$pages  ·  режим: $( [ -s "$CL_EXPERT" ] && echo ЭКСПЕРТ || echo обычный )"
+                start=$((page * pagesz + 1))
+                end=$((start + pagesz - 1))
+                r=4
+                awk -F"$TAB" -v a="$start" -v b="$end" '$1>=a && $1<=b' "$CL_ITEMS" | while IFS="$TAB" read -r i k n sz flag desc; do
+                    if grep -qxF "$i" "$CL_SEL" 2>/dev/null; then mark="[x]"; col="$C_OK"; else mark="[ ]"; col="$C_FG"; fi
+                    name=$n
+                    [ ${#name} -gt 30 ] && name=$(printf '%s…' "$(echo "$name" | cut -c1-29)")
+                    line=$(printf '%s %3s. %-31s %10s %-4s %s' "$mark" "$i" "$name" "$(human_kb "$sz")" "$flag" "$desc")
+                    ui_at "$r" 3 "$col$line$C_RESET"
+                    r=$((r + 1))
+                done
+                tsel=$(cleanup_total_selected)
+                ui_box $((TERM_R - 6)) 2 "$ROW_W" 5 "ВЫБРАНО"
+                ui_box_line $((TERM_R - 5)) 2 "$ROW_W" "Элементов: $(wc -l < "$CL_SEL" 2>/dev/null || echo 0)   ·   к удалению: $(human_kb "$tsel")" "$C_ACC"
+                ui_box_line $((TERM_R - 4)) 2 "$ROW_W" "команды: цифра=вкл/выкл · a=все · n=ничего · o=только overlay · i=инверсия"
+                ui_box_line $((TERM_R - 3)) 2 "$ROW_W" "         p/Enter=стр · e=эксперт(и системные) · z=пустые каталоги · d=УДАЛИТЬ · b=назад"
+                [ -s "$CL_EXPERT" ] && ui_box_line 3 2 "$ROW_W" "!! ЭКСПЕРТ: системные пакеты и файлы — можно сломать систему !!" "$C_BAD"
+                ui_prompt $((TERM_R - 1)) "  > "
+            else
+                echo
+                echo "=== ОЧИСТКА · найдено $total, страница $((page + 1))/$pages ==="
+                start=$((page * pagesz + 1)); end=$((start + pagesz - 1))
+                awk -F"$TAB" -v a="$start" -v b="$end" '$1>=a && $1<=b' "$CL_ITEMS" | while IFS="$TAB" read -r i k n sz flag desc; do
+                    if grep -qxF "$i" "$CL_SEL" 2>/dev/null; then mark="[x]"; else mark="[ ]"; fi
+                    printf '%s %3s. %-34s %10s %-4s %s\n' "$mark" "$i" "$n" "$(human_kb "$sz")" "$flag" "$desc"
+                done
+                [ -s "$CL_EXPERT" ] && echo "!! ЭКСПЕРТ: системные пакеты/файлы — можно сломать систему !!"
+                echo "выбрано: $(wc -l < "$CL_SEL" 2>/dev/null || echo 0) · к удалению: $(human_kb "$(cleanup_total_selected)")"
+                printf 'команды (цифра/a/n/o/i/e/z/p/d/r/b): '
+            fi
+        fi
+        read key
+        case "$key" in
+            [0-9]|[0-9][0-9]*)
+                cleanup_toggle "$key"
+                ;;
+            a) cleanup_select_all all ;;
+            n) cleanup_select_all none ;;
+            o) cleanup_select_all ovl ;;
+            i) cleanup_select_all inv ;;
+            p|"") [ $((page + 1)) -lt "$pages" ] && page=$((page + 1)) || page=0 ;;
+            e)
+                if [ -s "$CL_EXPERT" ]; then : > "$CL_EXPERT"; else echo 1 > "$CL_EXPERT"; fi
+                expert=0; [ -s "$CL_EXPERT" ] && expert=1
+                cleanup_collect "$expert"
+                page=0
+                ;;
+            d) cleanup_apply ;;
+            r) expert=0; [ -s "$CL_EXPERT" ] && expert=1; cleanup_collect "$expert"; page=0 ;;
+            z) cleanup_empty_dirs ;;
+            b) return 0 ;;
+            *) ;;
+        esac
+    done
+}
+
+# ---------------------------------------------------------------------
+#  Настройки (хранятся в /etc/dir320.conf)
+# ---------------------------------------------------------------------
+CFG=/etc/dir320.conf
+cfg_default() {
+    cat > "$CFG" <<EOF
+SSID="DIR-320"
+WIFI_PASS="ChangeMe-DIR320"
+CHANNEL="11"
+FTP_USER="ftpuser"
+FTP_PASS="ChangeMe-DIR320"
+FTP_SAME_ROOT="1"
+FTP_PORT="21"
+SITE_PORT="80"
+LUCI_PORT="8080"
+EOF
+}
+[ -f "$CFG" ] || cfg_default
+. "$CFG" 2>/dev/null
+[ -z "$FTP_SAME_ROOT" ] && FTP_SAME_ROOT=1
+
+save_cfg() {
+    cat > "$CFG" <<EOF
+SSID="$SSID"
+WIFI_PASS="$WIFI_PASS"
+CHANNEL="$CHANNEL"
+FTP_USER="$FTP_USER"
+FTP_PASS="$FTP_PASS"
+FTP_SAME_ROOT="$FTP_SAME_ROOT"
+FTP_PORT="$FTP_PORT"
+SITE_PORT="$SITE_PORT"
+LUCI_PORT="$LUCI_PORT"
+EOF
+}
+
+screen_settings() {
+    while :; do
+        if [ "$PLAIN" = "1" ]; then
+            echo
+            echo "=== НАСТРОЙКИ ==="
+            echo " 1) Wi-Fi SSID:        $SSID"
+            echo " 2) Wi-Fi пароль:      $WIFI_PASS"
+            echo " 3) Wi-Fi канал:       $CHANNEL"
+            echo " 4) FTP логин:         $FTP_USER"
+            echo " 5) FTP пароль:        $FTP_PASS"
+            echo " 6) Порт сайта/панели: $SITE_PORT"
+            echo " 7) Порт LuCI:         $LUCI_PORT"
+            echo " 8) Порт FTP:          $FTP_PORT"
+            if [ "$FTP_SAME_ROOT" = "1" ]; then fr="ВКЛ (пароль root)"; else fr="выкл"; fi
+            echo " 9) FTP-пароль = root: $fr"
+            echo " 0) Назад"
+            printf 'выбор: '
+        else
+            ui_clear; ui_fill_bg
+            ui_box 2 2 "$ROW_W" 15 "НАСТРОЙКИ УСТАНОВКИ"
+            ui_box_line 3 2 "$ROW_W" " 1) Wi-Fi SSID          $SSID"
+            ui_box_line 4 2 "$ROW_W" " 2) Wi-Fi пароль        $WIFI_PASS"
+            ui_box_line 5 2 "$ROW_W" " 3) Wi-Fi канал         $CHANNEL"
+            ui_box_line 6 2 "$ROW_W" " 4) FTP логин           $FTP_USER"
+            ui_box_line 7 2 "$ROW_W" " 5) FTP пароль          $FTP_PASS"
+            ui_box_line 8 2 "$ROW_W" " 6) Порт сайта/панели   $SITE_PORT"
+            ui_box_line 9 2 "$ROW_W" " 7) Порт LuCI           $LUCI_PORT"
+            ui_box_line 10 2 "$ROW_W" " 8) Порт FTP            $FTP_PORT"
+            if [ "$FTP_SAME_ROOT" = "1" ]; then fr="ВКЛ (пароль root)"; col="$C_OK"; else fr="выкл"; col="$C_WARN"; fi
+            ui_box_line 11 2 "$ROW_W" " 9) FTP-пароль = root   $fr" "$col"
+            ui_box_line 12 2 "$ROW_W" " 0) Назад" "$C_ACC"
+            ui_prompt $((TERM_R - 1)) "  выбор: "
+        fi
+        read k
+        case "$k" in
+            1) SSID=$(readone "SSID" "$SSID") ;;
+            2) WIFI_PASS=$(readone "Wi-Fi пароль" "$WIFI_PASS") ;;
+            3) CHANNEL=$(readone "Канал" "$CHANNEL") ;;
+            4) FTP_USER=$(readone "FTP логин" "$FTP_USER") ;;
+            5) FTP_PASS=$(readone "FTP пароль" "$FTP_PASS") ;;
+            6) SITE_PORT=$(readone "Порт сайта" "$SITE_PORT") ;;
+            7) LUCI_PORT=$(readone "Порт LuCI" "$LUCI_PORT") ;;
+            8) FTP_PORT=$(readone "Порт FTP" "$FTP_PORT") ;;
+            9)
+                if [ "$FTP_SAME_ROOT" = "1" ]; then FTP_SAME_ROOT=0; else FTP_SAME_ROOT=1; fi
+                save_cfg
+                if [ "$FTP_SAME_ROOT" = "1" ]; then
+                    if sync_ftp_to_root; then echo "  FTP-пароль синхронизирован с root"; else echo "  Не удалось прочитать хеш root"; fi
+                    install_ftp_sync
+                else
+                    remove_ftp_sync
+                    echo "  Автосинхронизация FTP с root отключена"
+                fi
+                ;;
+            0) save_cfg; return 0 ;;
+        esac
+        save_cfg
+    done
+}
+
+screen_install() {
+    if [ "$PLAIN" != "1" ]; then
+        ui_clear; ui_fill_bg
+        ui_box 2 2 "$ROW_W" 16 "УСТАНОВКА «ПОД КЛЮЧ»"
+        ui_box_line 3 2 "$ROW_W" "Будет установлено:"
+        ui_box_line 4 2 "$ROW_W" "  · веб-сервер + панель /admin  (порт $SITE_PORT)"
+        ui_box_line 5 2 "$ROW_W" "  · LuCI на порту $LUCI_PORT"
+        ui_box_line 6 2 "$ROW_W" "  · FTP, корень = папка сайта (порт $FTP_PORT, логин $FTP_USER)"
+        ui_box_line 7 2 "$ROW_W" "  · Wi-Fi «$SSID» (канал $CHANNEL)"
+        ui_box_line 8 2 "$ROW_W" "  · firewall для сети вышестоящего роутера"
+        ui_box_line 9 2 "$ROW_W" "  · отключение odhcpd/cron/wan6"
+        ui_box_line 11 2 "$ROW_W" "Текущие файлы /srv/www сохранятся (index.html будет заменён)." "$C_WARN"
+        ui_box_line 13 2 "$ROW_W" "Enter — установить · b — назад" "$C_ACC"
+        ui_prompt $((TERM_R - 1)) "  > "
+    else
+        echo
+        echo "=== УСТАНОВКА ==="
+        echo "сайт :$SITE_PORT  LuCI:$LUCI_PORT  FTP:$FTP_PORT ($FTP_USER)  Wi-Fi:$SSID/$CHANNEL"
+        printf 'Enter — установить, b — назад: '
+    fi
+    read go
+    [ "$go" = "b" ] && return 0
+    do_install "$SSID" "$WIFI_PASS" "$CHANNEL" "$FTP_USER" "$FTP_PASS" "$FTP_PORT" "$SITE_PORT" "$LUCI_PORT"
+    ui_pause
+}
+
+# ---------------------------------------------------------------------
+#  Главное меню
+# ---------------------------------------------------------------------
+screen_main() {
+    while :; do
+        if [ "$PLAIN" = "1" ]; then
+            echo
+            echo "=== DIR-320 · УСТАНОВЩИК v$VERSION ==="
+            echo " модель: $(model_name)  ·  $(owrt_ver)"
+            echo " флеш: $(df -h /overlay 2>/dev/null | awk 'NR==2{print $4" из "$2}')  ·  RAM: $(( $(ram_kb) / 1024 )) МБ свободно"
+            echo "-----------------------------------------------------------"
+            echo " 1) Установить всё «под ключ»"
+            echo " 2) Настройки (Wi-Fi / FTP / порты)"
+            echo " 3) Очистка системы «под чистую»"
+            echo " 4) Статус и диагностика"
+            echo " 5) Перезагрузить роутер"
+            echo " 0) Выход"
+            printf 'выбор: '
+        else
+            ui_clear; ui_fill_bg
+            ui_box 1 2 "$ROW_W" 3 "DIR-320 · УНИВЕРСАЛЬНЫЙ УСТАНОВЩИК  v$VERSION"
+            ui_box_line 2 2 "$ROW_W" "  $(model_name) · $(owrt_ver) · флеш: $(df -h /overlay 2>/dev/null | awk 'NR==2{print $4}') · RAM: $(( $(ram_kb) / 1024 )) МБ свободно" "$C_DIM"
+            ui_box 5 2 40 13 "МЕНЮ"
+            ui_box_line 6 2 40 "  1. Установить всё «под ключ»" "$C_OK"
+            ui_box_line 7 2 40 "  2. Настройки Wi-Fi / FTP / порты"
+            ui_box_line 8 2 40 "  3. Очистка системы «под чистую»" "$C_WARN"
+            ui_box_line 9 2 40 "  4. Статус и диагностика"
+            ui_box_line 10 2 40 "  5. Перезагрузить роутер"
+            ui_box_line 11 2 40 "  0. Выход" "$C_BAD"
+            ui_box 5 44 $((ROW_W - 42)) 13 "СОСТОЯНИЕ"
+            ui_box_line 6 44 $((ROW_W - 42)) "  сайт :80     $(port_open 80 && echo ОК || echo выкл)"
+            ui_box_line 7 44 $((ROW_W - 42)) "  панель :80/admin  $(port_open 80 && echo ОК || echo выкл)"
+            ui_box_line 8 44 $((ROW_W - 42)) "  LuCI :8080   $(port_open 8080 && echo ОК || echo выкл)"
+            ui_box_line 9 44 $((ROW_W - 42)) "  FTP :21      $(port_open 21 && echo ОК || echo выкл)"
+            ui_box_line 10 44 $((ROW_W - 42)) "  Wi-Fi        $(iwinfo wlan0 info 2>/dev/null | sed -n '1s/.*ESSID: //p')"
+            ui_box_line 11 44 $((ROW_W - 42)) "  FTP-корень   $(grep '^ftpuser:' /etc/passwd 2>/dev/null | cut -d: -f6)"
+            ui_box_line 12 44 $((ROW_W - 42)) "  пакетов      $(ls /usr/lib/opkg/info/*.control 2>/dev/null | wc -l)"
+            ui_prompt $((TERM_R - 1)) "  выбор: "
+        fi
+        read k
+        case "$k" in
+            1) screen_install ;;
+            2) screen_settings ;;
+            3) screen_cleanup ;;
+            4) show_status ;;
+            5)
+                printf 'Перезагрузить? (yes/no): '
+                read ok
+                [ "$ok" = "yes" ] && { sync; reboot; }
+                ;;
+            0) exit 0 ;;
+        esac
+    done
+}
+
+# ---------------------------------------------------------------------
+#  Неинтерактивные режимы
+# ---------------------------------------------------------------------
+case "$1" in
+    --status) show_status_exit=1; [ "$PLAIN" = "1" ] || PLAIN=1; show_status ;;
+    --detect)
+        PLAIN=1
+        pkg_leaf_list
+        echo "=== Пакеты-листья (никто не зависит) ==="
+        while IFS="$TAB" read -r n ov ins desc prot; do
+            [ -z "$n" ] && continue
+            printf 'package\t%s\t%s\t%s\t%s\t%s\n' "$n" "$ov" "$ins" "$desc" "${prot:-0}"
+        done < "$PKG_LEAVES"
+        file_scan
+        echo "=== Файлы в overlay без владельца ==="
+        while IFS="$TAB" read -r f sz; do
+            [ -z "$f" ] && continue
+            printf 'file\t%s\t%s\n' "$f" "$sz"
+        done < "$FILE_CAND"
+        ;;
+    --install-auto)
+        do_install "$SSID" "$WIFI_PASS" "$CHANNEL" "$FTP_USER" "$FTP_PASS" "$FTP_PORT" "$SITE_PORT" "$LUCI_PORT"
+        ;;
+    ""|--ui) ui_calc; ui_hide_cursor; trap 'ui_show_cursor; ui_reset; exit 0' INT TERM EXIT; screen_main ;;
+    *) echo "usage: $0 [--ui|--status|--detect|--install-auto]"; exit 1 ;;
+esac
+ui_show_cursor
+ui_reset

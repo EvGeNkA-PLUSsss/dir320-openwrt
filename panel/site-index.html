@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DIR-320 — сервер</title>
+<style>
+  body{font-family:system-ui,"Segoe UI",Arial,sans-serif;background:radial-gradient(1200px 600px at 15% -10%,#1e3a5f,#0b1220);color:#e2e8f0;margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:1rem}
+  .card{background:#111c2e;border:1px solid #22344d;padding:2rem 2.2rem;border-radius:18px;box-shadow:0 24px 60px rgba(0,0,0,.5);max-width:640px;width:100%}
+  h1{margin:0 0 .3rem;font-size:1.45rem}
+  p{color:#8ba3c2;line-height:1.6}
+  a.btn{display:flex;align-items:center;gap:10px;padding:12px 16px;margin:9px 0;border-radius:12px;background:#16243a;border:1px solid #22344d;color:#e2e8f0;text-decoration:none;transition:.15s}
+  a.btn:hover{border-color:#38bdf8;transform:translateY(-1px)}
+  a.btn .t{font-weight:600}
+  a.btn .d{color:#8ba3c2;font-size:.82rem}
+  .acc{color:#38bdf8;font-weight:700}
+  code{background:#0b1526;padding:.12rem .4rem;border-radius:6px;color:#7dd3fc}
+  h2{font-size:.8rem;text-transform:uppercase;letter-spacing:.08em;color:#8ba3c2;margin:1.6rem 0 .5rem}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>D-Link DIR-320</h1>
+  <p>OpenWrt 19.07 · web-сервер, FTP и панель управления работают.</p>
+
+  <h2>Управление</h2>
+  <a class="btn" href="/admin"><span class="acc">▣</span><span><span class="t">Панель управления</span><br><span class="d">/admin — место, температура, метрики, файлы, консоль, порты</span></span></a>
+  <a class="btn" href="http://192.168.1.1:8080/"><span class="acc">◈</span><span><span class="t">LuCI</span><br><span class="d">основная панель OpenWrt, порт 8080</span></span></a>
+
+  <h2>Сервисы</h2>
+  <a class="btn" href="ftp://192.168.1.1/"><span class="acc">⇅</span><span><span class="t">FTP — файлы сайта</span><br><span class="d">ftp://192.168.1.1/ · логин ftpuser · та же папка /srv/www, файлы сразу видны на сайте</span></span></a>
+
+  <h2>Сеть</h2>
+  <p>Wi-Fi: <code>DIR-320</code> (WPA2) · LAN: <code>192.168.1.0/24</code> · сайт и FTP: <code>/srv/www</code></p>
+</div>
+</body>
+</html>

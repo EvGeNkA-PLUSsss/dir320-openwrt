@@ -1,0 +1,37 @@
+name: build
+
+on:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build single-file installer
+        run: python3 tools/build_installer.py
+
+      - name: Syntax check (dash)
+        run: |
+          ls -l dist/
+          sh -n dist/dir320-tui.sh
+
+      - name: Sanity checks
+        run: |
+          grep -q 'FTP_SAME_ROOT' dist/dir320-tui.sh
+          grep -q 'dir320-sync-ftp' dist/dir320-tui.sh
+          ! grep -q 'root-ftp' dist/dir320-tui.sh || { echo 'BUG: root-ftp reference'; exit 1; }
+          echo OK
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dir320-tui
+          path: dist/dir320-tui.sh
+          if-no-files-found: error
