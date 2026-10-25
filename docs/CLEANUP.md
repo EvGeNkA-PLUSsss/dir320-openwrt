@@ -17,7 +17,12 @@
 
 - пакеты, владеющие **запущенными сейчас процессами** (по `/proc/<pid>/exe` → карта файл→пакет из `*.list`);
 - пакеты, владеющие **включёнными службами** (`/etc/rc.d/S*` → init-скрипт → пакет);
-- минимальное ядро системы: `base-files`, `busybox`, `libc`, `libgcc`, `procd`, `ubus`, `uci`, `netifd`, `fstools`, `dnsmasq`, `dropbear`, `firewall`, `iptables`, `uhttpd`, `rpcd`, `vsftpd`, Wi-Fi-стек (`kmod-*`, `wpad`, `iwinfo`, `swconfig`), LuCI (`luci*`), `lua`/`nixio` и т.д.;
+- базовые имена пакетов (`base-files`, `busybox`, `libc`, `procd`, `ubus`, `uci`, `netifd`, `dnsmasq`, `dropbear`, `firewall`, `uhttpd`, `rpcd`, `vsftpd`, `lua`, `iwinfo`, `iw`, `swconfig` и т.п.);
+- владельцы критичных файлов (интерпретатор Lua, `nixio`, веб-сервер, Dropbear, Netifd, DNSMasq, Wi-Fi-утилиты, `rpcd`);
+- пакеты **загруженных модулей ядра** (по `/proc/modules`), чтобы не отвалилось железо;
+- device-support модули (`kmod-leds*`, `kmod-input*`, `kmod-gpio*`, `kmod-button*`, `kmod-hwmon*`, `kmod-thermal*`);
+- пакеты WAN-протоколов, если они реально используются в `/etc/config/network` (`ppp*` для PPPoE/PPTP/L2TP/3G, `odhcp*` для IPv6-туннелей);
+- `luci*`, `rpcd*`, `liblucihttp*` — чтобы не сломать веб-интерфейсы;
 - всё, от чего эти пакеты зависят.
 
 ### 3. Файлы без владельца

@@ -1,115 +1,110 @@
-# DIR-320 OpenWrt: сайт, панель управления, FTP и установщик с псевдо-GUI
+# OpenWrt Universal Installer & Panel
 
 [![build](https://github.com/EvGeNkA-PLUSsss/dir320-openwrt/actions/workflows/build.yml/badge.svg)](https://github.com/EvGeNkA-PLUSsss/dir320-openwrt/actions/workflows/build.yml)
 
-Готовый набор для старых роутеров на OpenWrt (проверено на **D-Link DIR-320 B1**, Ralink RT5350, OpenWrt 19.07.10):
+Универсальный установщик для роутеров на OpenWrt: **один `.sh`-файл**, одно меню — **УСТАНОВИТЬ**. Установщик сам определяет модель, интерфейсы и секции конфигов (ничего не зашито под конкретное железо), максимально чистит систему от неиспользуемого и разворачивает:
 
-- **веб-сайт** на `:80` (`/srv/www`);
+- **сайт** на порту 80 (`/srv/www`);
 - **панель управления** `/admin` на Lua CGI: обзор, метрики, файлы, консоль, Wi-Fi, логи, настройки;
-- **FTP-сервер** (vsftpd), корень которого — та же папка, что у сайта: загрузил по FTP — сразу видно на сайте;
-- **пароль FTP = пароль роутера** (синхронизируется автоматически, в том числе через cron);
-- **один установочный `.sh`-файл** с псевдо-GUI в терминале: ставит всё «под ключ», настраивает Wi-Fi/FTP/порты и умеет **универсально** чистить неиспользуемые пакеты и файлы.
+- **FTP-сервер** (vsftpd), корень — папка сайта; **пароль FTP = пароль root** (синхронизируется автоматически);
+- **Wi-Fi** — точка доступа настраивается (текущие SSID/пароль сохраняются, при отсутствии генерируются);
+- **firewall** — правила для сайта, админки и FTP;
+- **очистку системы** — удаление неиспользуемых пакетов по графу зависимостей, файлов без владельца, пустых каталогов и кешей.
 
-> **English abstract.** A self-contained site + admin panel + FTP setup for D-Link DIR-320 B1 on OpenWrt 19.07, plus a single-file terminal-installer with a pseudo-GUI (ANSI). The admin panel is a small Lua CGI that authenticates against `/etc/shadow` (the same password as LuCI/SSH), so the FTPS password always equals the router password. `bin/dir320-tui.sh` installs everything, configures the network and offers a dependency-graph based cleanup of unused packages and orphan files. MIT licensed.
-
----
-
-## Возможности
-
-### Панель `/admin`
-| Вкладка | Что умеет |
-|---|---|
-| **Обзор** | модель, версия OpenWrt, ядро, uptime, load, память, флеш, Wi-Fi, сеть, службы, DHCP-аренды |
-| **Метрики** | графики CPU/памяти/сети/соединений в реальном времени, топ процессов по памяти, kill процесса |
-| **Файлы** | просмотр `/srv/www`, скачивание, загрузка (до 4 МБ), удаление, создание папок |
-| **Консоль** | выполнение любых команд с примерами и описанием (без лимита времени, вывод до 128 КБ) |
-| **Wi-Fi** | SSID, WPA2-пароль, канал, вкл/выкл. Работает и на чистой прошивке: секции Wi-Fi и `/etc/config/wireless` создаются автоматически, ошибки `uci` показываются в интерфейсе |
-| **Логи** | `logread`, фильтр |
-| **Настройки** | порты сайта/LuCI/FTP, имя хоста, смена пароля root (он же FTP), службы, бэкап, перезагрузка |
-
-Вход в панель — **пароль root** роутера (`/etc/shadow`, тот же, что у LuCI и SSH). Отдельного пароля у панели нет.
-
-### FTP
-- vsftpd 3.0.3, chroot в `/srv/www`, passive 50000–50100;
-- логин `ftpuser`, **пароль всегда равен паролю root**:
-  - при установке в `/etc/shadow` копируется хеш root;
-  - смена пароля через панель/установщик обновляет оба;
-  - `/usr/libexec/dir320-sync-ftp.sh` + cron раз в 2 минуты чинят расхождение, если пароль сменили через LuCI/SSH.
-
-### Универсальная очистка (в установщике)
-Без списков «ненужных пакетов» под конкретную модель:
-1. строится граф зависимостей по `/usr/lib/opkg/info/*.control`;
-2. кандидаты — «листья», от которых никто не зависит;
-3. защищаются пакеты, владеющие **запущенными процессами** и **включёнными службами** (`/etc/rc.d/S*`), плюс минимальное ядро (base-files, libc, procd, netifd, dnsmasq, dropbear, uhttpd, vsftpd, Wi-Fi-стек…);
-4. для каждого пакета считается реальный размер **в overlay** (сколько освободится, а не размер пакета из ROM);
-5. отдельно находятся **файлы без владельца** в `/overlay/upper` и **пустые каталоги**;
-6. экспертный режим показывает системные пакеты и `/etc`-файлы; удаление требует ввести `YES`.
-
-### Установщик `dir320-tui.sh`
-Один файл, внутри — файлы панели/сайта/README. Псевдо-GUI: ANSI-цвета, заливка фона символами, рамки, меню, чекбоксы.
-
-```
-1. Установить всё «под ключ»      4. Статус и диагностика
-2. Настройки Wi-Fi / FTP / порты  5. Перезагрузить роутер
-3. Очистка системы «под чистую»   0. Выход
-```
-
-Неинтерактивные режимы:
-
-```sh
-sh dir320-tui.sh --status        # информация о системе
-sh dir320-tui.sh --detect        # кандидаты на очистку (TSV)
-sh dir320-tui.sh --install-auto  # установка с настройками по умолчанию
-```
+> **English abstract.** A single-file, model-agnostic installer for OpenWrt routers. One menu item — INSTALL — which cleans unused packages/files and deploys a static site, a Lua CGI admin panel (`/admin`, authenticated against `/etc/shadow`), a vsftpd server rooted at the site directory (FTP password mirrors the root password), Wi-Fi AP settings and firewall rules. The panel can change Wi-Fi settings on any OpenWrt layout. MIT licensed.
 
 ---
 
 ## Быстрый старт
 
-### 1. Собрать установщик
-
-Нужен Python 3 (или `pwsh` — см. `tools/build_installer.ps1`):
-
 ```sh
+# собрать из исходников (нужен Python 3)
 python3 tools/build_installer.py
-# → dist/dir320-tui.sh
+# → dist/openwrt-installer.sh
+
+# закинуть на роутер и запустить
+scp -O -o HostKeyAlgorithms=+ssh-rsa dist/openwrt-installer.sh root@192.168.1.1:/tmp/
+ssh -o HostKeyAlgorithms=+ssh-rsa root@192.168.1.1 "sh /tmp/openwrt-installer.sh"
 ```
 
-### 2. Закинуть на роутер и запустить
+`-o HostKeyAlgorithms=+ssh-rsa` и `-O` нужны только для старых OpenWrt (Dropbear без sftp-server и с RSA/SHA-1 ключом). Подробнее — [docs/INSTALL.md](docs/INSTALL.md).
 
-С OpenWrt 19.07 (Dropbear) современный OpenSSH требует `-o HostKeyAlgorithms=+ssh-rsa`, а `scp` — ключ `-O` (в dropbear нет sftp-server):
+Без scp:
 
 ```sh
-scp -O -o HostKeyAlgorithms=+ssh-rsa dist/dir320-tui.sh root@192.168.1.1:/tmp/install.sh
-ssh -o HostKeyAlgorithms=+ssh-rsa root@192.168.1.1 "sh /tmp/install.sh"
+ssh -o HostKeyAlgorithms=+ssh-rsa root@IP "cat > /tmp/openwrt-installer.sh" < dist/openwrt-installer.sh
+ssh -o HostKeyAlgorithms=+ssh-rsa root@IP "sh /tmp/openwrt-installer.sh"
 ```
 
-Или без scp:
+### Меню
+
+```
++-----------------------------------------------------------+
+|  OpenWrt · УНИВЕРСАЛЬНЫЙ УСТАНОВЩИК  v3.0.0               |
+|  <модель> · OpenWrt <версия> · флеш ... · RAM ...          |
++-----------------------------------------------------------+
+|  1.  УСТАНОВИТЬ                                           |
+|      полная очистка системы + сайт + панель /admin        |
+|      + FTP + Wi-Fi                                        |
+|                                                           |
+|  0.  Выход                                                |
++-----------------------------------------------------------+
+```
+
+При выборе пункта показывается план, затем `Enter` — и всё выполняется автоматически. Повторный запуск безопасен (идемпотентно).
+
+Неинтерактивные режимы:
 
 ```sh
-ssh -o HostKeyAlgorithms=+ssh-rsa root@192.168.1.1 "cat > /tmp/install.sh" < dist/dir320-tui.sh
-ssh -o HostKeyAlgorithms=+ssh-rsa root@192.168.1.1 "sh /tmp/install.sh"
+sh openwrt-installer.sh --install   # очистка + установка без меню
+sh openwrt-installer.sh --detect    # кандидаты на очистку (TSV)
+sh openwrt-installer.sh --status    # краткий статус
 ```
 
-Подробно обо всех способах передачи (Windows `cmd`, PuTTY, WinSCP, HTTP, панель, IPv6 link-local) — в [docs/INSTALL.md](docs/INSTALL.md).
+---
 
-### 3. Открыть
+## Что устанавливается
 
-- сайт: `http://192.168.1.1/`
-- панель: `http://192.168.1.1/admin` (пароль root)
-- LuCI: `http://192.168.1.1:8080/`
-- FTP: `ftp://192.168.1.1/` — логин `ftpuser`, пароль = пароль root
+### Панель `/admin`
+| Вкладка | Что умеет |
+|---|---|
+| **Обзор** | модель, версия OpenWrt, ядро, uptime, load, память, флеш, Wi-Fi, сеть, службы, DHCP-аренды |
+| **Метрики** | графики CPU/памяти/сети/соединений, топ процессов по памяти, kill процесса |
+| **Файлы** | просмотр `/srv/www`, скачивание, загрузка (до 4 МБ), удаление, создание папок |
+| **Консоль** | команды с примерами и описанием (без лимита времени, вывод до 128 КБ) |
+| **Wi-Fi** | SSID, WPA2-пароль, канал, вкл/выкл; работает на любой раскладке секций (`radio0`, `radio1`, анонимные `@wifi-device[0]`), при отсутствии конфигурации создаёт её |
+| **Логи** | `logread`, фильтр |
+| **Настройки** | порты сайта/админки/FTP, имя хоста, смена пароля root (он же FTP), службы, бэкап, перезагрузка |
+
+Вход — **пароль root** (`/etc/shadow`, тот же, что у LuCI и SSH). Отдельного пароля у панели нет.
+
+### FTP
+- vsftpd, chroot в `/srv/www`, passive 50000–50100;
+- логин `ftpuser`, **пароль всегда равен паролю root**:
+  - при установке в `/etc/shadow` копируется хеш root;
+  - смена пароля через панель обновляет оба;
+  - `/usr/libexec/owinst-sync-ftp.sh` + cron раз в 2 минуты чинят расхождение.
+
+### Универсальная очистка
+Никаких списков «под модель»:
+1. строится граф зависимостей по `/usr/lib/opkg/info/*.control`;
+2. кандидаты — «листья», от которых никто не зависит;
+3. защищаются: базовые пакеты, пакеты **запущенных процессов**, **включённых служб**, **загруженных модулей ядра**, владельцы критичных файлов (интерпретатор Lua, веб-сервер, Wi-Fi-утилиты, dropbear, netifd, dnsmasq…), а также `luci*`/`rpcd*`;
+4. считается реальный размер **в overlay** (что освободится, а не размер из ROM);
+5. удаляются файлы без владельца в `/overlay/upper` (кроме `/etc`, `/srv`, `/root`), пустые каталоги, кеши opkg;
+6. в конце показывается, сколько освободилось.
+
+При необходимости очистку можно пропустить для теста: `OWINST_SKIP_CLEAN=1 sh openwrt-installer.sh`.
 
 ---
 
 ## Требования
 
-- роутер с OpenWrt 19.07.x (`mipsel_24kc`), желательно 8+ МБ RAM свободно в пике;
-- LuCI (пакеты `lua`, `liblua`, `luci-lib-nixio`) — в стандартной сборке есть;
-- `uhttpd` (стандартный веб-сервер OpenWrt);
-- интернет на роутере для установки `vsftpd` (либо положить `.ipk` локально — установщик умеет fallback на URL релиза 19.07.10).
-
-Скрипт рассчитан на OpenWrt 19.07 (uci/procd/busybox), на 21.02+ тоже должен работать, но не тестировался.
+- OpenWrt (uci/procd/busybox). Тестировалось на 19.07; на 21.02+ должно работать, но не гарантируется;
+- root-доступ по SSH;
+- для установки `vsftpd`/Lua-модулей — интернет на роутере (или заранее установленные пакеты);
+- для панели нужны `lua` и `nixio` (`luci-lib-nixio`) — установщик проверит и попробует поставить;
+- ~4 МБ свободного overlay для страниц/панели и пакетов (зависит от модели).
 
 ---
 
@@ -117,64 +112,49 @@ ssh -o HostKeyAlgorithms=+ssh-rsa root@192.168.1.1 "sh /tmp/install.sh"
 
 ```
 .
-├── panel/                    # файлы, которые ставятся на роутер
-│   ├── admin.lua             # панель (Lua CGI) — /srv/www/cgi-bin/admin
-│   ├── panel-console.sh      # обёртка консоли — /usr/libexec/panel-console.sh
-│   ├── index.html            # редирект /admin/ → /cgi-bin/admin
-│   ├── site-index.html       # главная сайта — /srv/www/index.html
-│   └── README-DIR320.txt     # памятка на роутере — /root/README-DIR320.txt
+├── panel/                     # файлы, которые ставятся на роутер
+│   ├── admin.lua              # панель (Lua CGI) — /srv/www/cgi-bin/admin
+│   ├── panel-console.sh       # обёртка консоли — /usr/libexec/panel-console.sh
+│   ├── index.html             # редирект /admin/ → /cgi-bin/admin
+│   ├── site-index.html        # главная сайта — /srv/www/index.html
+│   └── README-ROUTER.txt      # памятка на роутере — /root/README-ROUTER.txt
 ├── installer/
-│   └── dir320-tui.sh.in      # шаблон установщика (ANSI-меню, установка, очистка)
+│   └── openwrt-installer.sh.in  # шаблон установщика (меню, очистка, установка)
 ├── tools/
-│   ├── build_installer.py    # сборка одного файла dist/dir320-tui.sh
-│   └── build_installer.ps1   # то же для PowerShell
+│   ├── build_installer.py     # сборка dist/openwrt-installer.sh (Python 3)
+│   ├── build_installer.ps1    # то же для PowerShell
+│   └── test_wifi.py           # юнит-тесты Wi-Fi-логики панели (lupa)
 ├── docs/
-│   ├── INSTALL.md            # способы передачи файла и установка
-│   ├── ARCHITECTURE.md       # как устроены uhttpd/CGI/Lua/панель
-│   └── CLEANUP.md            # алгоритм универсальной очистки
+│   ├── INSTALL.md             # способы передачи файла и установка
+│   ├── ARCHITECTURE.md        # как устроены uhttpd/CGI/Lua/панель
+│   └── CLEANUP.md             # алгоритм очистки
 ├── .github/workflows/build.yml
 ├── CHANGELOG.md
-├── LICENSE                   # MIT
+├── LICENSE                    # MIT
 └── README.md
 ```
 
-Сборка одного файла: `tools/build_installer.py` подставляет содержимое `panel/*` в heredoc-маркеры шаблона и проверяет, что маркеры не встречаются в полезной нагрузке. Скрипт всегда пишет только LF — иначе busybox ash на роутере не разбирает файл.
-
-Тест Wi-Fi-логики панели без роутера: `pip install lupa && python tools/test_wifi.py`.
+Сборка подставляет содержимое `panel/*` в heredoc-маркеры шаблона, проверяет маркеры и пишет результат **только с LF** (иначе busybox ash не разберёт файл). Тест Wi-Fi: `pip install lupa && python tools/test_wifi.py`.
 
 ---
 
-## Настройки
+## Настройки и пароли
 
-Установщик хранит параметры в `/etc/dir320.conf` на роутере (Wi-Fi SSID/пароль/канал, логин/пароль FTP, порты). Менять удобнее в меню установщика: **2) Настройки**.
-
-По умолчанию:
-- сайт/панель — порт 80, LuCI — 8080, FTP — 21;
-- SSID `DIR-320`, WPA2, канал 11, страна RU;
-- FTP-логин `ftpuser`, пароль = пароль root.
-
-После установки: `/root/README-DIR320.txt` — краткая памятка по файлам и службам.
+- После установки: `/root/README-ROUTER.txt` — краткая памятка.
+- Параметры Wi-Fi и порты меняются в панели (вкладки «Wi-Fi» и «Настройки»).
+- Пароль root = пароль LuCI/SSH/панели/FTP; меняется в панели → Настройки.
 
 ---
 
 ## Безопасность
 
-- Панель, LuCI и SSH используют один пароль root. Меняйте его (`passwd` или панель → Настройки).
-- Панель слушает только LAN/`rfc1918_filter=1`; на WAN порт 80 пробросится только если вы сами откроете firewall.
-- FTP — **без TLS** (vsftpd без libssl): пароль и файлы идут по сети открытым текстом. Используйте только в доверенной сети.
-- Загружаемые через панель/консоль команды выполняются от root — это ожидаемо для админ-панели, но не давайте к ней доступ посторонним.
-- `--detect`/`cleanup` умеют удалять пакеты: обычный режим защищает запущенные службы и ядро системы, экспертный — снимает защиту (в нём подтверждение `YES`).
-
----
-
-## Ограничения
-
-- В RT5350 нет датчика температуры — панель честно пишет «не найден».
-- Панель — CGI: на каждый запрос создаётся процесс `lua` (~1–2 МБ пиково). Для 28 МБ RAM это нормально, но не стоит держать открытыми десятки вкладок с метриками.
-- В dropbear нет sftp-server, поэтому `scp` только с `-O`, а для SFTP нужно `opkg install openssh-sftp-server`.
+- Панель и CGI выполняются **от root** — не выставляйте их в интернет и не давайте доступ посторонним.
+- FTP без TLS: пароль и файлы идут открытым текстом, используйте только в доверенной сети.
+- Панель слушает LAN; на WAN правила firewall открывают только выбранные порты.
+- Очистка удаляет пакеты: обычный запуск защищает запущенные службы, но всегда проверяйте `--detect` перед удалением на нестандартной сборке.
 
 ---
 
 ## Лицензия
 
-[MIT](LICENSE). Проект не включает код OpenWrt/LuCI: он устанавливается поверх и использует системные пакеты (`uhttpd`, `vsftpd`, `lua`, `nixio`), у которых свои лицензии (GPL-2.0, Apache-2.0 и т.д.).
+[MIT](LICENSE). Проект не включает код OpenWrt/LuCI: используется системный `uhttpd`, `vsftpd`, `lua`, `nixio` со своими лицензиями.

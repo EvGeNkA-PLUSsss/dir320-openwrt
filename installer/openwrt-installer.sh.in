@@ -1,0 +1,771 @@
+#!/bin/sh
+# =====================================================================
+#  OpenWrt — универсальный установщик: сайт + панель + FTP + Wi-Fi
+#  Один файл. Сам определяет интерфейсы и секции конфигов.
+#  Пункт меню один: УСТАНОВИТЬ (очистка + установка).
+#  Запуск: sh openwrt-installer.sh     (--detect | --status | --install)
+# =====================================================================
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+TAB=$(printf '\t')
+
+VERSION="3.0.0"
+SITE=/srv/www
+PANEL_CONSOLE=/usr/libexec/panel-console.sh
+SYNC_FTP=/usr/libexec/owinst-sync-ftp.sh
+TMPD=/tmp/.owinst
+mkdir -p "$TMPD" 2>/dev/null
+trap 'rm -rf "$TMPD" 2>/dev/null' EXIT INT TERM
+
+# ---------------------------------------------------------------------
+#  Терминал / псевдо-GUI
+# ---------------------------------------------------------------------
+ESC=$(printf '\033')
+PLAIN=0
+[ -t 1 ] || PLAIN=1
+[ -n "$OWINST_PLAIN" ] && PLAIN=1
+[ "$TERM" = "dumb" ] && PLAIN=1
+
+if [ "$PLAIN" = "1" ]; then
+    C_RESET=; C_FG=; C_BG=; C_ACC=; C_OK=; C_BAD=; C_WARN=; C_DIM=; C_BOLD=
+else
+    C_RESET="$ESC[0m"; C_FG="$ESC[38;5;252m"; C_BG="$ESC[48;5;234m"
+    C_ACC="$ESC[38;5;45m"; C_OK="$ESC[38;5;82m"; C_BAD="$ESC[38;5;203m"
+    C_WARN="$ESC[38;5;214m"; C_DIM="$ESC[38;5;244m"; C_BOLD="$ESC[1m"
+fi
+TERM_R=30; TERM_C=80
+
+ui_calc() {
+    if [ -t 1 ]; then
+        sz=$(stty size 2>/dev/null)
+        if [ -n "$sz" ]; then
+            set -- $sz
+            TERM_R=$1; TERM_C=$2
+            [ "$TERM_R" -lt 20 ] && TERM_R=20
+            [ "$TERM_C" -lt 70 ] && TERM_C=70
+        fi
+    fi
+}
+ui_hide() { [ "$PLAIN" = "1" ] || printf '%s' "$ESC[?25l"; }
+ui_show() { [ "$PLAIN" = "1" ] || printf '%s' "$ESC[?25h"; }
+ui_reset(){ printf '%s' "$C_RESET"; }
+ui_clear(){ ui_show; if [ "$PLAIN" = "1" ]; then printf '\n'; else printf '%s[2J%s[H' "$ESC" "$ESC"; fi; }
+
+ui_at() {
+    if [ "$PLAIN" = "1" ]; then printf '%s\n' "$3"; else
+        printf '%s[%d;%dH%s%s%s' "$ESC" "$1" "$2" "$C_BG$C_FG" "$3" "$C_RESET"
+    fi
+}
+ui_fill() {
+    [ "$PLAIN" = "1" ] && return 0
+    line=""; i=0
+    while [ $i -lt "$TERM_C" ]; do line="$line░"; i=$((i + 1)); done
+    r=1
+    while [ $r -le "$TERM_R" ]; do
+        printf '%s[%d;1H%s%s%s' "$ESC" "$r" "$C_DIM$C_BG" "$line" "$C_RESET"
+        r=$((r + 1))
+    done
+}
+ui_box() { # row col width height
+    r=$1; c=$2; w=$3; h=$4
+    if [ "$PLAIN" = "1" ]; then
+        printf '+%s+\n' "$(printf '%*s' $((w - 2)) '' | tr ' ' '-')"
+        return 0
+    fi
+    top="+"; i=$((c + 1)); end=$((c + w - 2))
+    while [ $i -le $end ]; do top="$top-"; i=$((i + 1)); done
+    top="$top+"
+    ui_at "$r" "$c" "$top"
+    inner=""; i=0
+    while [ $i -lt $((w - 2)) ]; do inner="$inner "; i=$((i + 1)); done
+    y=$((r + 1))
+    while [ $y -lt $((r + h - 1)) ]; do ui_at "$y" "$c" "|$inner|"; y=$((y + 1)); done
+    bot="+"; i=1
+    while [ $i -lt $((w - 1)) ]; do bot="$bot-"; i=$((i + 1)); done
+    bot="$bot+"
+    ui_at "$y" "$c" "$bot"
+}
+ui_line() { # row col width text [color]
+    r=$1; c=$2; w=$3; t=$4; col=${5:-$C_FG}
+    if [ "$PLAIN" = "1" ]; then printf '| %s\n' "$t"; else
+        ui_at "$r" $((c + 2)) "$col$t$C_RESET"
+    fi
+}
+ui_msg() {
+    t=$1; kind=${2:-}
+    case "$kind" in
+        ok) [ "$PLAIN" = "1" ] && echo "[OK] $t" || ui_line $((TERM_R - 2)) 3 $((TERM_C - 4)) "$t" "$C_OK" ;;
+        err) [ "$PLAIN" = "1" ] && echo "[!!] $t" || ui_line $((TERM_R - 2)) 3 $((TERM_C - 4)) "$t" "$C_BAD" ;;
+        warn) [ "$PLAIN" = "1" ] && echo "[!] $t" || ui_line $((TERM_R - 2)) 3 $((TERM_C - 4)) "$t" "$C_WARN" ;;
+        *) [ "$PLAIN" = "1" ] && echo "$t" || ui_line $((TERM_R - 2)) 3 $((TERM_C - 4)) "$t" ;;
+    esac
+}
+ui_pause() {
+    if [ "$PLAIN" = "1" ]; then read -r _x; else
+        printf '%s[%d;3H%s' "$ESC" $((TERM_R - 1)) "$C_ACC  Enter… $C_RESET"
+        read -r _x
+    fi
+}
+say() { echo "  $*"; }
+ok()  { echo "  [ok] $*"; }
+bad() { echo "  [!!] $*"; }
+
+# ---------------------------------------------------------------------
+#  Встроенные файлы
+# ---------------------------------------------------------------------
+write_payloads() {
+    mkdir -p "$SITE/cgi-bin" "$SITE/admin" /usr/libexec /root
+    cat > "$SITE/cgi-bin/admin" <<'__OW_PANEL_EOF__'
+@@ADMIN_LUA@@
+__OW_PANEL_EOF__
+    cat > "$PANEL_CONSOLE" <<'__OW_CONSOLE_EOF__'
+@@PANEL_CONSOLE@@
+__OW_CONSOLE_EOF__
+    cat > "$SITE/admin/index.html" <<'__OW_AINDEX_EOF__'
+@@ADMIN_INDEX@@
+__OW_AINDEX_EOF__
+    cat > "$SITE/index.html" <<'__OW_SITE_EOF__'
+@@SITE_INDEX@@
+__OW_SITE_EOF__
+    cat > /root/README-ROUTER.txt <<'__OW_README_EOF__'
+@@README@@
+__OW_README_EOF__
+    # панель — Lua CGI; shebang под найденный интерпретатор
+    if [ -n "$LUA_BIN" ]; then
+        sed -i "1s|.*|#!$LUA_BIN|" "$SITE/cgi-bin/admin"
+    fi
+    chmod 755 "$SITE/cgi-bin/admin" "$PANEL_CONSOLE"
+    chmod 644 "$SITE/admin/index.html" "$SITE/index.html" /root/README-ROUTER.txt
+    chown -R 1000:1000 "$SITE" 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------------
+#  Утилиты
+# ---------------------------------------------------------------------
+have() { command -v "$1" >/dev/null 2>&1; }
+uci_g() { uci -q get "$1" 2>/dev/null; }
+uci_s() { uci set "$1=$2" 2>/dev/null; }
+model_name() { cat /tmp/sysinfo/model 2>/dev/null || cat /proc/device-tree/model 2>/dev/null | tr -d '\0'; }
+owrt_ver() { sed -n "s/^DISTRIB_DESCRIPTION='\(.*\)'/\1/p" /etc/openwrt_release 2>/dev/null; }
+hostname_g() { uci_g "system.@system[0].hostname" || cat /proc/sys/kernel/hostname 2>/dev/null; }
+free_kb() { df -k /overlay 2>/dev/null | awk 'NR==2{print $4}'; }
+ram_kb() { awk '/MemAvailable/{print $2}' /proc/meminfo 2>/dev/null; }
+rand_hex() { hexdump -v -n 8 -e '/1 "%02x"' /dev/urandom 2>/dev/null | cut -c1-16; }
+lan_ip() { ip -4 addr show 2>/dev/null | awk '/^[0-9]+: /{ifn=$2; sub(":","",ifn)} /inet /{if(ifn=="lo")next; split($2,a,"/"); print a[1]; exit}'; }
+port_in_use() { netstat -tln 2>/dev/null | grep -q ":$1 "; }
+first_port() { uci_g "uhttpd.$1.listen_http" | head -n1 | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p'; }
+human_kb() {
+    b=$1
+    [ "$b" -lt 1024 ] && { echo "${b} Б"; return; }
+    kb=$((b / 1024))
+    [ "$kb" -lt 1024 ] && { echo "${kb} КБ"; return; }
+    printf '%s.%s МБ' $((kb / 1024)) $(((kb % 1024) * 10 / 1024))
+}
+log() { echo "$*" >> "$TMPD/install.log"; }
+
+# ---------------------------------------------------------------------
+#  Пакеты: граф зависимостей, overlay-размер, универсальная защита
+# ---------------------------------------------------------------------
+PKG_TMP=$TMPD/pkgs; PKG_REQ=$TMPD/req; PKG_PROT=$TMPD/prot; PKG_OV=$TMPD/ov
+PKG_LEAVES=$TMPD/leaves; SIZES=$TMPD/sizes; OWNER=$TMPD/owner; FILE_CAND=$TMPD/files
+
+scan_sizes() {
+    find /overlay/upper -type f -exec wc -c {} + 2>/dev/null | awk '
+        / total$/ { next }
+        { sz = $1; sub(/^ *[0-9]+ +/, "", $0); print sz "\t" $0 }
+    ' > "$SIZES"
+}
+
+scan_pkgs() {
+    [ -d /usr/lib/opkg/info ] || return 1
+    awk '
+        FNR == 1 {
+            if (name != "") printf "%s\t%d\t%s\t%s\n", name, size, deps, desc
+            name = ""; size = 0; deps = ""; desc = ""
+        }
+        /^Package: /        { name = substr($0, 10) }
+        /^Installed-Size: / { size = substr($0, 17) + 0 }
+        /^Depends: /        { deps = substr($0, 10) }
+        /^Description: /    { d = substr($0, 14); gsub(/^ +/, "", d); if (length(d) > 60) d = substr(d, 1, 60) "…"; desc = d }
+        END { if (name != "") printf "%s\t%d\t%s\t%s\n", name, size, deps, desc }
+    ' /usr/lib/opkg/info/*.control > "$PKG_TMP"
+
+    awk -F"$TAB" '{ n = split($3, a, ","); for (i = 1; i <= n; i++) { d = a[i]; sub(/\(.*/, "", d); gsub(/ /, "", d); if (d != "") print d } }' "$PKG_TMP" | sort -u > "$PKG_REQ"
+    awk '{ f = FILENAME; sub(/.*\//, "", f); sub(/\.list$/, "", f); print $0 "\t" f }' /usr/lib/opkg/info/*.list > "$OWNER"
+
+    awk -F"$TAB" '
+        NR == FNR { p = $2; sub("^/overlay/upper", "", p); sz[p] = $1; next }
+        ($1 in sz) { sum[$2] += sz[$1] }
+        END { for (k in sum) print k "\t" sum[k] }
+    ' "$SIZES" "$OWNER" > "$PKG_OV"
+
+    # 1) базовые пакеты (только общие имена, ничего модельного)
+    : > "$PKG_PROT"
+    for p in base-files busybox kernel libc libgcc1 libgcc libpthread librt logd procd \
+             ubus ubusd uci netifd fstools mtd jshn jsonfilter uclient-fetch usign \
+             getrandom urngd urandom-seed firewall iptables ip6tables dnsmasq dropbear \
+             opkg lua lua5.1 liblua liblua5.1 luci-lib-nixio vsftpd uhttpd rpcd wireless-regdb \
+             iwinfo iw swconfig; do
+        echo "$p" >> "$PKG_PROT"
+    done
+
+    # 2) пакеты, владеющие критичными файлами (интерпретатор, веб-сервер, Wi-Fi и т.п.)
+    for f in /bin/busybox /sbin/procd /sbin/netifd /sbin/uci /usr/bin/lua /usr/bin/lua5.1 \
+             /usr/sbin/uhttpd /usr/sbin/dropbear /usr/sbin/dnsmasq /usr/sbin/vsftpd \
+             /sbin/wifi /usr/sbin/wpad /usr/sbin/hostapd /usr/sbin/wpa_supplicant \
+             /usr/sbin/iw /usr/sbin/iwinfo /sbin/swconfig /usr/libexec/rpcd /usr/sbin/odhcpd; do
+        [ -e "$f" ] && awk -F"$TAB" -v e="$f" '$1==e{print $2}' "$OWNER" >> "$PKG_PROT"
+    done
+    # 3) пакеты, владеющие Lua-модулями (nixio и т.п.)
+    awk -F"$TAB" '$1 ~ /\/lua\/.*nixio.*\.so$/ {print $2}' "$OWNER" >> "$PKG_PROT"
+
+    # 4) запущенные процессы, включённые службы, загруженные модули ядра
+    ls -l /proc/[0-9]*/exe 2>/dev/null | awk -F' -> ' '{print $2}' > "$TMPD/need"
+    ls -l /etc/rc.d/S* 2>/dev/null | awk -F' -> ' '{print $2}' | sed 's#^\.\./#/etc/#' >> "$TMPD/need"
+    awk -F"$TAB" 'NR == FNR { need[$1] = 1; next } ($1 in need) { print $2 }' "$TMPD/need" "$OWNER" >> "$PKG_PROT"
+    if [ -r /proc/modules ]; then
+        awk '{ print $1 }' /proc/modules > "$TMPD/mods"
+        awk -F"$TAB" 'NR == FNR { m[$1] = 1; next }
+            { n = $1; sub(/.*\//, "", n); sub(/\.ko.*/, "", n); if (n in m) print $2 }
+        ' "$TMPD/mods" "$OWNER" >> "$PKG_PROT"
+    fi
+    rm -f "$TMPD/need" "$TMPD/mods"
+
+    # 5) device support: LED/кнопки/датчики/GPIO — не трогаем, даже если «листья»
+    awk '$1 ~ /^(kmod-leds|kmod-input|kmod-gpio|kmod-button|kmod-hwmon|kmod-thermal)/ {print $1}' "$PKG_TMP" >> "$PKG_PROT"
+    # 6) WAN-протоколы, которые реально используются в конфиге сети
+    netcfg=$(uci -q show network 2>/dev/null)
+    if echo "$netcfg" | grep -qE "\.proto='(pppoe|pptp|l2tp|3g|qmi|ncm|mbim)'"; then
+        awk '$1 ~ /^(ppp|kmod-ppp|kmod-pppoe|kmod-pppox|xl2tpd)/ {print $1}' "$PKG_TMP" >> "$PKG_PROT"
+    fi
+    if echo "$netcfg" | grep -qE "\.proto='(dhcpv6|6in4|6to4|6rd)'"; then
+        awk '$1 ~ /^odhcp/ {print $1}' "$PKG_TMP" >> "$PKG_PROT"
+    fi
+    # префиксы, которые не трогаем (интерфейсы/менеджеры)
+    awk '$1 ~ /^(luci|rpcd|liblucihttp)/ {print $1}' "$PKG_TMP" >> "$PKG_PROT"
+    sort -u "$PKG_PROT" > "$PKG_PROT.u" && mv "$PKG_PROT.u" "$PKG_PROT"
+
+    if [ -s "$PKG_OV" ] && [ -s "$PKG_TMP" ]; then
+        awk -F"$TAB" 'NR == FNR { ov[$1] = $2; next } { print $0 "\t" (ov[$1] + 0) }' "$PKG_OV" "$PKG_TMP" > "$PKG_TMP.o" && mv "$PKG_TMP.o" "$PKG_TMP"
+    else
+        awk '{ print $0 "\t0" }' "$PKG_TMP" > "$PKG_TMP.o" && mv "$PKG_TMP.o" "$PKG_TMP"
+    fi
+    return 0
+}
+
+pkg_leaf_list() {
+    scan_sizes; scan_pkgs || return 1
+    : > "$TMPD/sets"
+    awk '{ print "P\t" $0 }' "$PKG_PROT" >> "$TMPD/sets"
+    awk '{ print "R\t" $0 }' "$PKG_REQ" >> "$TMPD/sets"
+    awk -F"$TAB" '
+        NR == FNR { set[$1 "\t" $2] = 1; next }
+        !(("R\t" $1) in set) {
+            prot = (("P\t" $1) in set) ? 1 : 0
+            print $1 "\t" $5 "\t" $2 "\t" $4 "\t" prot
+        }
+    ' "$TMPD/sets" "$PKG_TMP" > "$PKG_LEAVES"
+    sort -t "$TAB" -k2 -nr "$PKG_LEAVES" > "$PKG_LEAVES.s" 2>/dev/null && mv "$PKG_LEAVES.s" "$PKG_LEAVES"
+    rm -f "$TMPD/sets"
+}
+
+file_scan() {
+    : > "$FILE_CAND"
+    [ -d /overlay/upper ] || return 0
+    awk -F"$TAB" '
+        NR == FNR { own[$1] = 1; next }
+        {
+            rel = $2; sub("^/overlay/upper", "", rel)
+            if (rel ~ /^\/(etc|srv|root)\//) next
+            if (rel ~ /^\/usr\/lib\/opkg\//) next
+            if (rel == "/usr/libexec/panel-console.sh" || rel == "/usr/libexec/owinst-sync-ftp.sh") next
+            if (rel in own) next
+            if ($1 < 4096) next
+            print rel "\t" $1
+        }
+    ' "$OWNER" "$SIZES" > "$FILE_CAND"
+    sort -t "$TAB" -k2 -nr "$FILE_CAND" > "$FILE_CAND.s" 2>/dev/null && mv "$FILE_CAND.s" "$FILE_CAND"
+}
+
+cleanup_empty_dirs() {
+    find /overlay/upper -type d 2>/dev/null | sort -r | while read -r d; do
+        case "$d" in
+            /overlay/upper|/overlay/upper/srv|/overlay/upper/srv/*|/overlay/upper/root|/overlay/upper/root/*) continue ;;
+            /overlay/upper/usr|/overlay/upper/lib|/overlay/upper/bin|/overlay/upper/sbin|/overlay/upper/etc|/overlay/upper/www|/overlay/upper/mnt|/overlay/upper/dev|/overlay/upper/proc|/overlay/upper/sys|/overlay/upper/tmp|/overlay/upper/var|/overlay/upper/rom) continue ;;
+        esac
+        rmdir "$d" 2>/dev/null
+    done
+}
+
+# Максимальная автоматическая очистка
+cleanup_all() {
+    if [ "$OWINST_SKIP_CLEAN" = "1" ]; then
+        say "очистка пропущена (OWINST_SKIP_CLEAN=1)"
+        return 0
+    fi
+    before=$(free_kb)
+    pkg_leaf_list || { bad "opkg не найден — очистка пакетов пропущена"; return 0; }
+    total=0; cnt=0
+    while IFS="$TAB" read -r n ov ins desc prot; do
+        [ -z "$n" ] && continue
+        [ "$prot" = "1" ] && continue
+        printf '%s\n' "$n" >> "$TMPD/remove"
+        total=$((total + ov)); cnt=$((cnt + 1))
+    done < "$PKG_LEAVES"
+    if [ -s "$TMPD/remove" ] && [ "$cnt" -gt 0 ]; then
+        say "удаляю неиспользуемые пакеты: $cnt (освободится ~$(human_kb "$total"))"
+        opkg remove $(cat "$TMPD/remove") > "$TMPD/remove.log" 2>&1 || true
+        tail -n 3 "$TMPD/remove.log" | sed 's/^/    /'
+    else
+        say "неиспользуемых пакетов не найдено"
+    fi
+    # файлы без владельца
+    scan_sizes; [ -s "$OWNER" ] && file_scan >/dev/null 2>&1
+    fcnt=0; fsum=0
+    if [ -s "$FILE_CAND" ]; then
+        while IFS="$TAB" read -r f sz; do
+            [ -z "$f" ] && continue
+            rm -f "/overlay/upper$f" 2>/dev/null && { fcnt=$((fcnt + 1)); fsum=$((fsum + sz)); }
+        done < "$FILE_CAND"
+    fi
+    [ "$fcnt" -gt 0 ] && say "удалено файлов без владельца: $fcnt ($(human_kb "$fsum"))"
+    cleanup_empty_dirs
+    # кеши/мусор
+    opkg clean >/dev/null 2>&1 || true
+    rm -f /tmp/*.ipk /tmp/opkg-* 2>/dev/null || true
+    after=$(free_kb)
+    gain=$((after - before)); [ "$gain" -lt 0 ] && gain=0
+    ok "очистка завершена, освобождено: $(human_kb $((gain * 1024))) (свободно: $(human_kb $((after * 1024))))"
+}
+
+# ---------------------------------------------------------------------
+#  Wi-Fi (универсально: любые имена секций)
+# ---------------------------------------------------------------------
+wifi_sections() {
+    out=$(uci -q show wireless 2>/dev/null)
+    [ -z "$out" ] && return 0
+    dev=""; iface=""
+    echo "$out" | while IFS= read -r line; do
+        sec=$(echo "$line" | sed -n 's/^wireless\.\([^=]*\)=.*/\1/p')
+        typ=$(echo "$line" | sed -n 's/^wireless\.[^=]*=\([^ ]*\)$/\1/p')
+        case "$typ" in
+            wifi-device) echo "D $sec" ;;
+            wifi-iface)  echo "I $sec" ;;
+        esac
+    done | awk '$1=="D" && !d {print "D " $2; d=1} $1=="I" && !i {print "I " $2; i=1}'
+}
+
+wifi_apply() {
+    ensure=$(uci -q show wireless 2>/dev/null)
+    if [ -z "$ensure" ]; then
+        say "конфигурация Wi-Fi отсутствует — создаю"
+        wifi config >/dev/null 2>&1 || true
+        [ -z "$(uci -q show wireless 2>/dev/null)" ] && wifi detect > /etc/config/wireless 2>/dev/null
+    fi
+    secs=$(wifi_sections)
+    dev=$(echo "$secs" | awk '$1=="D"{print $2}')
+    iface=$(echo "$secs" | awk '$1=="I"{print $2; exit}')
+    if [ -z "$dev" ]; then
+        say "Wi-Fi не обнаружен — пропускаю"
+        return 0
+    fi
+    if [ -z "$iface" ]; then
+        uci add wireless wifi-iface >/dev/null 2>&1
+        iface=$(wifi_sections | awk '$1=="I"{print $2; exit}')
+    fi
+    [ -z "$iface" ] && { say "не удалось создать wifi-iface"; return 0; }
+
+    ssid=$(uci_g "wireless.$iface.ssid"); [ -z "$ssid" ] && ssid=$(hostname_g); [ -z "$ssid" ] && ssid="OpenWrt"
+    key=$(uci_g "wireless.$iface.key")
+    newkey=0
+    if [ ${#key} -lt 8 ]; then key=$(rand_hex); newkey=1; fi
+    ch=$(uci_g "wireless.$dev.channel")
+    case "$ch" in ''|*[!0-9]*) ch=6 ;; esac
+    [ "$ch" -lt 1 ] && ch=6
+    [ "$ch" -gt 13 ] && ch=6
+
+    uci_s "wireless.$dev.disabled" "0"
+    uci_s "wireless.$dev.channel" "$ch"
+    uci_s "wireless.$iface.mode" "ap"
+    uci_s "wireless.$iface.network" "lan"
+    uci_s "wireless.$iface.ssid" "$ssid"
+    uci_s "wireless.$iface.encryption" "psk2"
+    uci_s "wireless.$iface.key" "$key"
+    uci commit wireless 2>/dev/null
+    (sleep 1; wifi reload) >/dev/null 2>&1 &
+    WIFI_SSID="$ssid"; WIFI_KEY="$key"; WIFI_NEWKEY="$newkey"
+    [ "$newkey" = "1" ] && say "Wi-Fi: сеть «$ssid», пароль «$key» (сгенерирован)" || say "Wi-Fi: сеть «$ssid» (пароль оставлен прежним)"
+    return 0
+}
+
+# ---------------------------------------------------------------------
+#  Веб-сервер
+# ---------------------------------------------------------------------
+first_port() { uci_g "uhttpd.$1.listen_http" | head -n1 | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p'; }
+
+apply_uhttpd() {
+    if ! have uhttpd; then
+        opkg update >/dev/null 2>&1
+        opkg install uhttpd >/dev/null 2>&1 || true
+    fi
+    [ -x /usr/sbin/uhttpd ] || { bad "uhttpd не найден — сайт/панель не поднять"; return 1; }
+    luci_cur=$(first_port main)
+    [ -z "$luci_cur" ] && luci_cur=80
+    if [ "$luci_cur" = "80" ]; then
+        luci_port=8080
+        port_in_use 8080 && luci_port=8081
+        port_in_use 8081 && luci_port=8082
+    else
+        luci_port=$luci_cur
+    fi
+    site_port=80
+    [ "$luci_port" = "80" ] && site_port=8000
+
+    uci -q delete uhttpd.site 2>/dev/null
+    uci set uhttpd.site=uhttpd 2>/dev/null
+    uci_s uhttpd.site.listen_http "0.0.0.0:$site_port"
+    uci add_list "uhttpd.site.listen_http=[::]:$site_port" 2>/dev/null
+    uci_s uhttpd.site.home "$SITE"
+    uci_s uhttpd.site.cgi_prefix "/cgi-bin"
+    uci_s uhttpd.site.script_timeout "0"
+    uci_s uhttpd.site.rfc1918_filter "1"
+    uci_s uhttpd.site.max_requests "3"
+    uci_s uhttpd.site.max_connections "100"
+    uci -q delete uhttpd.main.listen_http 2>/dev/null
+    uci_s uhttpd.main.listen_http "0.0.0.0:$luci_port"
+    uci add_list "uhttpd.main.listen_http=[::]:$luci_port" 2>/dev/null
+    uci commit uhttpd 2>/dev/null
+    SITE_PORT=$site_port; LUCI_PORT=$luci_port
+    say "веб: сайт :$site_port, админка :$luci_port"
+    return 0
+}
+
+apply_firewall() {
+    mkrule() {
+        uci -q delete "firewall.$1" 2>/dev/null
+        uci set "firewall.$1=rule" 2>/dev/null
+        uci set "firewall.$1.name=$1" 2>/dev/null
+        uci set "firewall.$1.src=wan" 2>/dev/null
+        uci set "firewall.$1.proto=tcp" 2>/dev/null
+        uci set "firewall.$1.dest_port=$2" 2>/dev/null
+        uci set "firewall.$1.target=ACCEPT" 2>/dev/null
+    }
+    mkrule Allow_Site "$SITE_PORT"
+    mkrule Allow_Admin "$LUCI_PORT"
+    mkrule Allow_FTP "21"
+    mkrule Allow_FTP_PASV "50000-50100"
+    uci commit firewall 2>/dev/null
+}
+
+# ---------------------------------------------------------------------
+#  FTP
+# ---------------------------------------------------------------------
+root_hash() { awk -F: '$1=="root"{print $2}' /etc/shadow 2>/dev/null; }
+
+ensure_vsftpd() {
+    [ -x /usr/sbin/vsftpd ] && return 0
+    say "устанавливаю vsftpd"
+    opkg update >/dev/null 2>&1
+    opkg install vsftpd > "$TMPD/opkg.log" 2>&1 || true
+    [ -x /usr/sbin/vsftpd ] && return 0
+    tail -n 3 "$TMPD/opkg.log" 2>/dev/null | sed 's/^/    /'
+    return 1
+}
+
+apply_ftp() {
+    u=ftpuser
+    grep -q "^$u:" /etc/passwd 2>/dev/null || echo "$u:x:1000:1000:FTP:$SITE:/bin/false" >> /etc/passwd
+    sed -i "s#^\($u:[^:]*:[^:]*:[^:]*:[^:]*\):[^:]*:#\1:$SITE:#" /etc/passwd 2>/dev/null
+    rh=$(root_hash)
+    if grep -q "^$u:" /etc/shadow 2>/dev/null; then
+        sed -i "s#^\($u:\)[^:]*:#\1$rh:#" /etc/shadow
+    else
+        echo "$u:$rh:0:0:99999:7:::" >> /etc/shadow
+    fi
+    grep -q "^$u:" /etc/group 2>/dev/null || echo "$u:x:1000:" >> /etc/group
+    chmod 600 /etc/shadow
+    mkdir -p /var/run/vsftpd/empty
+    cat > /etc/vsftpd.conf <<EOF
+background=NO
+listen=YES
+listen_ipv6=NO
+anonymous_enable=NO
+local_enable=YES
+write_enable=YES
+local_umask=022
+check_shell=NO
+session_support=NO
+connect_from_port_20=NO
+chroot_local_user=YES
+allow_writeable_chroot=YES
+secure_chroot_dir=/var/run/vsftpd/empty
+pasv_enable=YES
+pasv_min_port=50000
+pasv_max_port=50100
+seccomp_sandbox=NO
+ftpd_banner=OpenWrt FTP
+EOF
+    cat > /etc/init.d/vsftpd <<'EOF_INIT'
+#!/bin/sh /etc/rc.common
+START=50
+USE_PROCD=1
+
+start_service() {
+    mkdir -p /var/run/vsftpd/empty
+    procd_open_instance
+    procd_set_param command /usr/sbin/vsftpd
+    procd_set_param respawn
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+    procd_close_instance
+}
+
+service_triggers() {
+    procd_add_reload_trigger "vsftpd"
+}
+EOF_INIT
+    chmod 755 /etc/init.d/vsftpd
+    /etc/init.d/vsftpd enable >/dev/null 2>&1
+    /etc/init.d/vsftpd restart >/dev/null 2>&1
+    chown -R 1000:1000 "$SITE" 2>/dev/null || true
+}
+
+install_ftp_sync() {
+    cat > "$SYNC_FTP" <<'EOF_SYNC'
+#!/bin/sh
+rh=$(awk -F: '$1=="root"{print $2}' /etc/shadow 2>/dev/null)
+ch=$(awk -F: '$1=="ftpuser"{print $2}' /etc/shadow 2>/dev/null)
+[ -n "$rh" ] || exit 0
+[ "$rh" = "$ch" ] && exit 0
+if [ -z "$ch" ]; then
+    echo "ftpuser:$rh:0:0:99999:7:::" >> /etc/shadow
+else
+    sed -i "s#^ftpuser:[^:]*:#ftpuser:$rh:#" /etc/shadow
+fi
+chmod 600 /etc/shadow
+/etc/init.d/vsftpd restart >/dev/null 2>&1 &
+EOF_SYNC
+    chmod 755 "$SYNC_FTP"
+    mkdir -p /etc/crontabs
+    sed -i '/dir320-sync-ftp/d;/owinst-sync-ftp/d' /etc/crontabs/root 2>/dev/null
+    echo "*/2 * * * * $SYNC_FTP" >> /etc/crontabs/root
+    /etc/init.d/cron enable >/dev/null 2>&1
+    /etc/init.d/cron restart >/dev/null 2>&1
+}
+
+# ---------------------------------------------------------------------
+#  Lua/nixio для панели
+# ---------------------------------------------------------------------
+find_lua() {
+    for c in /usr/bin/lua /usr/bin/lua5.1 /usr/bin/lua5.3 /usr/bin/lua5.4 /usr/bin/luajit; do
+        [ -x "$c" ] && { LUA_BIN=$c; return 0; }
+    done
+    if command -v lua >/dev/null 2>&1; then LUA_BIN=$(command -v lua); return 0; fi
+    return 1
+}
+
+ensure_panel_deps() {
+    LUA_BIN=""
+    find_lua || {
+        say "ставлю Lua"
+        opkg update >/dev/null 2>&1
+        opkg install lua liblua >/dev/null 2>&1 || opkg install lua5.1 liblua5.1 >/dev/null 2>&1
+        find_lua || true
+    }
+    [ -z "$LUA_BIN" ] && { bad "Lua не найден — панель работать не будет"; return 1; }
+    if ! "$LUA_BIN" -e 'require"nixio"' >/dev/null 2>&1; then
+        say "ставлю Lua-модуль nixio"
+        opkg update >/dev/null 2>&1
+        opkg install luci-lib-nixio >/dev/null 2>&1 || true
+    fi
+    "$LUA_BIN" -e 'require"nixio"' >/dev/null 2>&1 || { bad "nixio не найден — панель работать не будет"; return 1; }
+    return 0
+}
+
+# ---------------------------------------------------------------------
+#  Установка
+# ---------------------------------------------------------------------
+do_install() {
+    START_TS=$(date +%s)
+    echo
+    say "=== УНИВЕРСАЛЬНАЯ УСТАНОВКА OpenWrt ==="
+    say "модель: $(model_name) · $(owrt_ver)"
+    say "очистка и установка начаты…"
+    echo
+    say "[1/8] анализ и очистка системы"
+    cleanup_all
+    echo
+    say "[2/8] зависимости панели (Lua/nixio)"
+    ensure_panel_deps
+    echo
+    say "[3/8] файлы сайта и панели"
+    write_payloads
+    if [ -f "$0" ]; then
+        cp "$0" /root/openwrt-installer.sh 2>/dev/null
+        chmod 755 /root/openwrt-installer.sh 2>/dev/null
+    fi
+    ok "панель: $SITE/cgi-bin/admin"
+    echo
+    say "[4/8] FTP-сервер"
+    if ensure_vsftpd; then
+        apply_ftp
+        install_ftp_sync
+        ok "FTP: ftpuser / пароль root, корень $SITE"
+    else
+        bad "vsftpd не установлен — FTP пропущен"
+    fi
+    echo
+    say "[5/8] веб-сервер и порты"
+    apply_uhttpd || bad "uhttpd не настроен"
+    echo
+    say "[6/8] Wi-Fi"
+    wifi_apply
+    echo
+    say "[7/8] firewall"
+    apply_firewall
+    echo
+    say "[8/8] перезапуск служб"
+    /etc/init.d/uhttpd restart >/dev/null 2>&1
+    /etc/init.d/uhttpd restart >/dev/null 2>&1
+    /etc/init.d/vsftpd restart >/dev/null 2>&1
+    /etc/init.d/firewall reload >/dev/null 2>&1
+    sleep 2
+    sync
+    END_TS=$(date +%s)
+    DUR=$((END_TS - START_TS))
+
+    ip=$(lan_ip)
+    [ -z "$ip" ] && ip="<IP роутера>"
+    echo
+    echo "  ──────────────────────────────────────────────"
+    ok "установка завершена за ${DUR}s"
+    say "сайт:    http://$ip/"
+    say "панель:  http://$ip/admin (пароль root)"
+    say "LuCI:    http://$ip:$LUCI_PORT/"
+    say "FTP:     ftp://$ip/  логин ftpuser / пароль root"
+    if [ -n "$WIFI_SSID" ]; then
+        if [ "$WIFI_NEWKEY" = "1" ]; then
+            say "Wi-Fi:   $WIFI_SSID / $WIFI_KEY"
+        else
+            say "Wi-Fi:   $WIFI_SSID (пароль прежний)"
+        fi
+    fi
+    say "памятка: /root/README-ROUTER.txt"
+}
+
+# ---------------------------------------------------------------------
+#  --detect / --status
+# ---------------------------------------------------------------------
+detect_mode() {
+    PLAIN=1
+    echo "=== пакеты-листья (prot=1 — защищены) ==="
+    pkg_leaf_list || { echo "opkg не найден"; return 1; }
+    while IFS="$TAB" read -r n ov ins desc prot; do
+        [ -z "$n" ] && continue
+        printf 'package\t%s\t%s\t%s\t%s\t%s\n' "$n" "$ov" "$ins" "$desc" "$prot"
+    done < "$PKG_LEAVES"
+    echo "=== файлы без владельца ==="
+    file_scan
+    while IFS="$TAB" read -r f sz; do
+        [ -z "$f" ] && continue
+        printf 'file\t%s\t%s\n' "$f" "$sz"
+    done < "$FILE_CAND"
+}
+
+status_mode() {
+    PLAIN=1
+    echo
+    echo "=== Статус ==="
+    echo "модель:    $(model_name)"
+    echo "OpenWrt:   $(owrt_ver)"
+    echo "ядро:      $(uname -r)"
+    echo "uptime:    $(uptime | sed 's/.*up //;s/,.*//')"
+    echo "флеш:      $(df -h /overlay 2>/dev/null | awk 'NR==2{print $4" свободно из "$2}')"
+    echo "RAM:       $(( $(ram_kb) / 1024 )) МБ свободно"
+    echo "пакеты:    $(ls /usr/lib/opkg/info/*.control 2>/dev/null | wc -l)"
+    echo "порты:     80:$(port_in_use 80 && echo open || echo closed) 8080:$(port_in_use 8080 && echo open || echo closed) 21:$(port_in_use 21 && echo open || echo closed)"
+    echo "IP:        $(lan_ip)"
+    echo "Wi-Fi:     $(iwinfo 2>/dev/null | head -n1 | awk '{print $1}')"
+    echo
+}
+
+# ---------------------------------------------------------------------
+#  Меню: единственный пункт — УСТАНОВИТЬ
+# ---------------------------------------------------------------------
+screen_main() {
+    ui_calc
+    ui_hide
+    if [ "$PLAIN" = "1" ]; then
+        echo
+        echo "=== OpenWrt · УНИВЕРСАЛЬНЫЙ УСТАНОВЩИК v$VERSION ==="
+        echo " модель: $(model_name)"
+        echo " $(owrt_ver)"
+        echo " флеш: $(df -h /overlay 2>/dev/null | awk 'NR==2{print $4" из "$2}')  RAM: $(( $(ram_kb) / 1024 )) МБ свободно"
+        echo "-----------------------------------------------------------"
+        echo " 1) УСТАНОВИТЬ (очистка + сайт + панель + FTP + Wi-Fi)"
+        echo " 0) Выход"
+        printf 'выбор: '
+    else
+        ui_clear; ui_fill
+        ui_box 2 2 "$TERM_C" 3
+        ui_line 2 2 "$TERM_C" "  OpenWrt · УНИВЕРСАЛЬНЫЙ УСТАНОВЩИК  v$VERSION" "$C_ACC$C_BOLD"
+        ui_line 3 2 "$TERM_C" "  $(model_name) · $(owrt_ver) · флеш: $(df -h /overlay 2>/dev/null | awk 'NR==2{print $4}') · RAM: $(( $(ram_kb) / 1024 )) МБ" "$C_DIM"
+        ui_box 5 2 "$TERM_C" 7
+        ui_line 6 2 "$TERM_C" "  1.  УСТАНОВИТЬ" "$C_OK$C_BOLD"
+        ui_line 7 2 "$TERM_C" "      полная очистка системы + сайт + панель /admin + FTP + Wi-Fi" "$C_DIM"
+        ui_line 9 2 "$TERM_C" "  0.  Выход" "$C_BAD"
+        printf '%s[%d;3H%s' "$ESC" $((TERM_R - 1)) "$C_ACC  выбор: $C_RESET"
+    fi
+    read -r k
+    case "$k" in
+        1) confirm_and_install ;;
+        0) ui_show; ui_reset; exit 0 ;;
+        *) screen_main ;;
+    esac
+}
+
+confirm_and_install() {
+    if [ "$PLAIN" = "1" ]; then
+        echo
+        echo "Будет выполнено:"
+        echo "  - очистка: удаление неиспользуемых пакетов, файлов-сирот, кешей"
+        echo "  - сайт: /srv/www (порт 80)"
+        echo "  - панель /admin (Lua CGI, вход = пароль root)"
+        echo "  - FTP: корень /srv/www, пароль = пароль root"
+        echo "  - Wi-Fi: текущая сеть/пароль (если не заданы — сгенерируется)"
+        printf 'Enter — начать, b — отмена: '
+        read -r go
+        [ "$go" = "b" ] && return 0
+        do_install
+        exit 0
+    fi
+    ui_clear; ui_fill
+    ui_box 2 2 "$TERM_C" 14
+    ui_line 2 2 "$TERM_C" "  УСТАНОВКА — план" "$C_ACC$C_BOLD"
+    ui_line 4 2 "$TERM_C" "  1. Полная очистка: неиспользуемые пакеты, файлы-сироты, кеши" "$C_WARN"
+    ui_line 5 2 "$TERM_C" "  2. Сайт  /srv/www  ·  порт 80"
+    ui_line 6 2 "$TERM_C" "  3. Панель /admin  ·  вход паролем root"
+    ui_line 7 2 "$TERM_C" "  4. FTP  ·  корень /srv/www  ·  пароль = пароль root"
+    ui_line 8 2 "$TERM_C" "  5. Wi-Fi  ·  текущие SSID/пароль (иначе сгенерируются)"
+    ui_line 9 2 "$TERM_C" "  6. firewall: 80, админка, 21, 50000-50100"
+    ui_line 11 2 "$TERM_C" "  Enter — начать   ·   b — отмена" "$C_OK"
+    printf '%s[%d;3H%s' "$ESC" $((TERM_R - 1)) "$C_ACC  > $C_RESET"
+    read -r go
+    [ "$go" = "b" ] && return 0
+    ui_show
+    ui_reset
+    ui_clear
+    do_install
+    ui_show
+    ui_reset
+    exit 0
+}
+
+case "$1" in
+    --install) PLAIN=1; do_install ;;
+    --detect) detect_mode ;;
+    --status) status_mode ;;
+    ""|--ui) screen_main ;;
+    *) echo "usage: $0 [--install|--detect|--status]"; exit 1 ;;
+esac

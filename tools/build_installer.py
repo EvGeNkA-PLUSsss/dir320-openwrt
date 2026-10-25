@@ -12,8 +12,8 @@ import pathlib
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-TEMPLATE = ROOT / "installer" / "dir320-tui.sh.in"
-DEFAULT_OUT = ROOT / "dist" / "dir320-tui.sh"
+TEMPLATE = ROOT / "installer" / "openwrt-installer.sh.in"
+DEFAULT_OUT = ROOT / "dist" / "openwrt-installer.sh"
 
 # токен -> файл
 PAYLOADS = {
@@ -21,16 +21,16 @@ PAYLOADS = {
     "@@PANEL_CONSOLE@@": ROOT / "panel" / "panel-console.sh",
     "@@ADMIN_INDEX@@": ROOT / "panel" / "index.html",
     "@@SITE_INDEX@@": ROOT / "panel" / "site-index.html",
-    "@@README@@": ROOT / "panel" / "README-DIR320.txt",
+    "@@README@@": ROOT / "panel" / "README-ROUTER.txt",
 }
 
 # закрывающие строки heredoc в шаблоне
 HEREDOC_MARKERS = [
-    "__PANEL_ADMIN_EOF__",
-    "__PANEL_CONSOLE_EOF__",
-    "__PANEL_AINDEX_EOF__",
-    "__PANEL_SITE_EOF__",
-    "__PANEL_README_EOF__",
+    "__OW_PANEL_EOF__",
+    "__OW_CONSOLE_EOF__",
+    "__OW_AINDEX_EOF__",
+    "__OW_SITE_EOF__",
+    "__OW_README_EOF__",
 ]
 
 

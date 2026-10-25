@@ -21,18 +21,18 @@ jobs:
       - name: Syntax check (dash)
         run: |
           ls -l dist/
-          sh -n dist/dir320-tui.sh
-          python3 -c "import sys; d=open('dist/dir320-tui.sh','rb').read(); sys.exit(1 if b'\r' in d else 0)" && echo 'LF-only OK'
+          sh -n dist/openwrt-installer.sh
+          python3 -c "import sys; d=open('dist/openwrt-installer.sh','rb').read(); sys.exit(1 if b'\r' in d else 0)" && echo 'LF-only OK'
 
       - name: Sanity checks
         run: |
-          grep -q 'FTP_SAME_ROOT' dist/dir320-tui.sh
-          grep -q 'dir320-sync-ftp' dist/dir320-tui.sh
-          ! grep -q 'root-ftp' dist/dir320-tui.sh || { echo 'BUG: root-ftp reference'; exit 1; }
+          grep -q 'УСТАНОВИТЬ' dist/openwrt-installer.sh
+          grep -q 'owinst-sync-ftp' dist/openwrt-installer.sh
+          ! grep -qi 'dir320\|DIR-320' dist/openwrt-installer.sh || { echo 'BUG: model-specific string'; exit 1; }
           echo OK
 
       - uses: actions/upload-artifact@v4
         with:
-          name: dir320-tui
-          path: dist/dir320-tui.sh
+          name: openwrt-installer
+          path: dist/openwrt-installer.sh
           if-no-files-found: error

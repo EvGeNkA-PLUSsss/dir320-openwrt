@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>DIR-320 — сервер</title>
+<title>Роутер — сервер</title>
 <style>
   body{font-family:system-ui,"Segoe UI",Arial,sans-serif;background:radial-gradient(1200px 600px at 15% -10%,#1e3a5f,#0b1220);color:#e2e8f0;margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:1rem}
   .card{background:#111c2e;border:1px solid #22344d;padding:2rem 2.2rem;border-radius:18px;box-shadow:0 24px 60px rgba(0,0,0,.5);max-width:640px;width:100%}
@@ -20,18 +20,24 @@
 </head>
 <body>
 <div class="card">
-  <h1>D-Link DIR-320</h1>
-  <p>OpenWrt 19.07 · web-сервер, FTP и панель управления работают.</p>
+  <h1 id="host">Роутер</h1>
+  <p>OpenWrt · веб-сервер, FTP и панель управления работают.</p>
 
   <h2>Управление</h2>
-  <a class="btn" href="/admin"><span class="acc">▣</span><span><span class="t">Панель управления</span><br><span class="d">/admin — место, температура, метрики, файлы, консоль, порты</span></span></a>
-  <a class="btn" href="http://192.168.1.1:8080/"><span class="acc">◈</span><span><span class="t">LuCI</span><br><span class="d">основная панель OpenWrt, порт 8080</span></span></a>
+  <a class="btn" href="/admin"><span class="acc">▣</span><span><span class="t">Панель управления</span><br><span class="d">/admin — состояние, метрики, файлы, консоль, Wi-Fi, порты</span></span></a>
+  <a class="btn" id="lnk-luci" href="#"><span class="acc">◈</span><span><span class="t">LuCI</span><br><span class="d">основная панель OpenWrt (порт может отличаться)</span></span></a>
 
   <h2>Сервисы</h2>
-  <a class="btn" href="ftp://192.168.1.1/"><span class="acc">⇅</span><span><span class="t">FTP — файлы сайта</span><br><span class="d">ftp://192.168.1.1/ · логин ftpuser · та же папка /srv/www, файлы сразу видны на сайте</span></span></a>
+  <a class="btn" id="lnk-ftp" href="#"><span class="acc">⇅</span><span><span class="t">FTP — файлы сайта</span><br><span class="d">логин ftpuser · та же папка /srv/www, файлы сразу видны на сайте</span></span></a>
 
   <h2>Сеть</h2>
-  <p>Wi-Fi: <code>DIR-320</code> (WPA2) · LAN: <code>192.168.1.0/24</code> · сайт и FTP: <code>/srv/www</code></p>
+  <p>Wi-Fi настраивается в панели · файлы сайта: <code>/srv/www</code> · FTP-логин: <code>ftpuser</code></p>
 </div>
+<script>
+  var h = location.hostname;
+  document.getElementById("host").textContent = h;
+  document.getElementById("lnk-luci").href = "http://" + h + ":8080/";
+  document.getElementById("lnk-ftp").href = "ftp://" + h + "/";
+</script>
 </body>
 </html>

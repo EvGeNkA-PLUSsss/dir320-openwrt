@@ -2,16 +2,16 @@
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 
-$template = Join-Path $root 'installer\dir320-tui.sh.in'
+$template = Join-Path $root 'installer\openwrt-installer.sh.in'
 $outDir = Join-Path $root 'dist'
-$out = Join-Path $outDir 'dir320-tui.sh'
+$out = Join-Path $outDir 'openwrt-installer.sh'
 
 $map = [ordered]@{
     '@@ADMIN_LUA@@'     = Join-Path $root 'panel\admin.lua'
     '@@PANEL_CONSOLE@@' = Join-Path $root 'panel\panel-console.sh'
     '@@ADMIN_INDEX@@'   = Join-Path $root 'panel\index.html'
     '@@SITE_INDEX@@'    = Join-Path $root 'panel\site-index.html'
-    '@@README@@'        = Join-Path $root 'panel\README-DIR320.txt'
+    '@@README@@'        = Join-Path $root 'panel\README-ROUTER.txt'
 }
 
 if (-not (Test-Path $template)) { throw "нет шаблона: $template" }
@@ -24,7 +24,7 @@ foreach ($k in $map.Keys) {
     $src = $src.Replace($k, $content)
 }
 
-foreach ($m in @('__PANEL_ADMIN_EOF__', '__PANEL_CONSOLE_EOF__', '__PANEL_AINDEX_EOF__', '__PANEL_SITE_EOF__', '__PANEL_README_EOF__')) {
+foreach ($m in @('__OW_PANEL_EOF__', '__OW_CONSOLE_EOF__', '__OW_AINDEX_EOF__', '__OW_SITE_EOF__', '__OW_README_EOF__')) {
     $cnt = ($src -split "`n" | Where-Object { $_ -eq $m }).Count
     if ($cnt -ne 1) { throw "маркер $m встречается $cnt раз" }
 }

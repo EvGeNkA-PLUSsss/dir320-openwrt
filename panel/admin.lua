@@ -1,6 +1,6 @@
 #!/usr/bin/lua
 -- =====================================================================
---  DIR-320 B1 / OpenWrt 19.07 — контрольная панель (:80/admin)
+--  OpenWrt — панель управления (:80/admin)
 --  Авторизация: логин/пароль из /etc/shadow (те же, что у LuCI),
 --  проверка через nixio.crypt() — тот же механизм, что использует LuCI.
 -- =====================================================================
@@ -299,18 +299,33 @@ local function netdev()
   return t
 end
 
+-- Имя беспроводного интерфейса определяется универсально
+local function wifi_dev()
+  local out = exec("iwinfo 2>/dev/null")
+  for line in out:gmatch("[^\n]+") do
+    local d = line:match("^([%w%-_%.]+)%s")
+    if d then return d end
+  end
+  local iw = exec("iw dev 2>/dev/null")
+  return iw:match("Interface%s+([%w%-_%.]+)")
+end
+
 local function wifi_info()
-  local info = exec("iwinfo wlan0 info 2>/dev/null")
+  local dev = wifi_dev()
+  if not dev then
+    return { essid = "", mode = "", channel = 0, txpower = 0, stations = {}, clients = 0 }
+  end
+  local info = exec("iwinfo " .. dev .. " info 2>/dev/null")
   local essid   = info:match('ESSID:%s*"(.-)"') or ""
   local mode    = trim(info:match("Mode:%s*(%S+)") or "")
   local channel = tonumber(info:match("Channel:%s*(%d+)") or 0)
   local txpower = tonumber(info:match("Tx%-Power:%s*(%d+)") or 0)
   local stations = {}
-  local al = exec("iwinfo wlan0 assoclist 2>/dev/null")
+  local al = exec("iwinfo " .. dev .. " assoclist 2>/dev/null")
   for mac, sig in al:gmatch("(%x%x:%x%x:%x%x:%x%x:%x%x:%x%x)%s+(-?%d+) dBm") do
     stations[#stations + 1] = { mac = mac, signal = tonumber(sig) }
   end
-  return { essid = essid, mode = mode, channel = channel,
+  return { dev = dev, essid = essid, mode = mode, channel = channel,
            txpower = txpower, stations = stations, clients = #stations }
 end
 
@@ -418,12 +433,12 @@ local function uci_set(key, val)
 end
 
 -- Имена секций wifi-device / wifi-iface. Работает и с именованными
--- (radio0/default_radio0), и с анонимными (@wifi-device[0]) секциями.
+-- (именованные, например radio0/radio1, и анонимные @wifi-device[0]) секциями.
 local function wifi_sections()
   local out = exec("uci -q show wireless 2>/dev/null")
   if out == "" then return nil, nil end
   local dev, iface
-  -- строки вида: wireless.radio0=wifi-device и wireless.radio0.channel='11'
+  -- строки вида: wireless.<секция>=wifi-device и wireless.<секция>.<параметр>='...'
   for line in out:gmatch("[^\n]+") do
     local sec, typ = line:match("^wireless%.([^%=]+)=([%w%-]+)$")
     if sec then
@@ -525,7 +540,7 @@ local function do_backup()
     return
   end
   respond("200 OK", "application/gzip", d, {
-    ["Content-Disposition"] = 'attachment; filename="dir320-backup.tar.gz"',
+    ["Content-Disposition"] = 'attachment; filename="router-backup.tar.gz"',
   })
 end
 -- ============================ actions ================================
@@ -817,7 +832,7 @@ end
 local LOGIN_HTML = [==[
 <!DOCTYPE html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>DIR-320 — вход</title>
+<title>OpenWrt — вход</title>
 <style>
 *{box-sizing:border-box}
 body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
@@ -834,7 +849,7 @@ button:hover{filter:brightness(1.08)}
 .hint{margin-top:16px;font-size:.74rem;color:#5c7391;line-height:1.5}
 </style></head><body>
 <form class="box" method="post" action="/cgi-bin/admin?action=login">
-  <h1>DIR-320</h1>
+  <h1>OpenWrt</h1>
   <p class="sub">Панель управления · вход как в LuCI</p>
   <label>Пользователь</label>
   <input name="user" value="root" autocomplete="username" autofocus>
@@ -849,7 +864,7 @@ button:hover{filter:brightness(1.08)}
 local PAGE_HTML = [==[
 <!DOCTYPE html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>DIR-320 — панель</title>
+<title>OpenWrt — панель</title>
 <style>
 :root{--bg:#0b1220;--panel:#111c2e;--panel2:#16243a;--line:#22344d;--txt:#e2e8f0;--mut:#8ba3c2;--acc:#38bdf8;--ok:#4ade80;--warn:#fbbf24;--bad:#f87171}
 *{box-sizing:border-box}
@@ -907,7 +922,7 @@ small.mut{color:var(--mut)}
 @media(max-width:600px){header h1{font-size:.9rem}main{padding:12px}}
 </style></head><body>
 <header>
-  <h1>DIR-320 · панель</h1>
+  <h1>OpenWrt · панель</h1>
   <span class="host" id="hdrhost">…</span>
   <span class="sp"></span>
   <span class="host" id="hdrload"></span>
@@ -990,7 +1005,7 @@ small.mut{color:var(--mut)}
       <button class="btn" onclick="quick('free')">free</button>
       <button class="btn" onclick="quick('ps w')">ps w</button>
       <button class="btn" onclick="quick('logread | tail -n 40')">logread</button>
-      <button class="btn" onclick="quick('iwinfo wlan0 assoclist')">Wi-Fi клиенты</button>
+      <button class="btn" onclick="quick('iwinfo')">Wi-Fi клиенты</button>
       <button class="btn" onclick="quick('uci show')">uci show</button>
     </div>
     <details class="card" style="margin-bottom:12px">
@@ -1065,7 +1080,7 @@ function setTab(t){TAB=t;document.querySelectorAll("#tabs button").forEach(b=>b.
 document.querySelectorAll("#tabs button").forEach(b=>b.onclick=()=>setTab(b.dataset.tab));
 async function refreshOverview(){const s=await api("stats");if(!s||s.error)return;document.getElementById("hdrhost").textContent=s.hostname+" · "+s.model;document.getElementById("hdrload").textContent="load "+s.load.map(x=>x.toFixed(2)).join(" / ");
  const mp=s.mem.total?100*(s.mem.total-s.mem.free)/s.mem.total:0, dp=s.disk.total?100*s.disk.used/s.disk.total:0;
- const temp=s.temp==null?'<div class="kv"><span>Датчик</span><b>не найден (RT5350)</b></div>':`<div class="kv"><span>Температура</span><b>${s.temp.toFixed(1)} °C</b></div>`;
+ const temp=s.temp==null?'<div class="kv"><span>Датчик</span><b>не найден</b></div>':`<div class="kv"><span>Температура</span><b>${s.temp.toFixed(1)} °C</b></div>`;
  let html="";
  html+=`<div class="card"><h3>Система</h3>
    <div class="kv"><span>Имя</span><b>${E(s.hostname)}</b></div>
@@ -1090,7 +1105,7 @@ async function refreshOverview(){const s=await api("stats");if(!s||s.error)retur
    <div class="kv"><span>Свободно</span><b>${fmtB(s.disk.free)}</b></div>
    ${bar(dp)}<small class="mut">занято ${dp.toFixed(0)}%</small></div>`;
  html+=`<div class="card"><h3>Температура</h3>${temp}
-   <small class="mut">В RT5350 нет встроенного датчика температуры.</small></div>`;
+   <small class="mut">Датчик температуры на этом роутере не обнаружен.</small></div>`;
  html+=`<div class="card"><h3>Wi-Fi</h3>
    <div class="kv"><span>Сеть</span><b>${E(s.wifi.essid)}</b></div>
    <div class="kv"><span>Канал</span><b>${s.wifi.channel||"–"} (2.4 ГГц)</b></div>
@@ -1108,7 +1123,7 @@ function drawChart(id,series){const c=document.getElementById(id);if(!c)return;c
  const n=60;let max=1;series.forEach(s=>s.values.forEach(v=>{if(v>max)max=v}));max*=1.15;
  g.strokeStyle="#1d2c42";g.lineWidth=1;for(let i=0;i<=3;i++){const y=h*(i/3);g.beginPath();g.moveTo(0,y);g.lineTo(w,y);g.stroke()}
  series.forEach(s=>{g.beginPath();g.strokeStyle=s.color;g.lineWidth=2;const vals=s.values.slice(-n);const off=n-vals.length;vals.forEach((v,i)=>{const x=off+i,px=w*(x/(n-1)),py=h-(v/max)*h;if(i===0)g.moveTo(px,py);else g.lineTo(px,py)});g.stroke()})}
-function startMetrics(){stopMetrics();const poll=async()=>{const m=await api("metrics");if(!m||m.error)return;const prev=METRIC_DATA[METRIC_DATA.length-1];const pt=(Date.now())/1000;let rx=0,tx=0;if(prev){const dt=Math.max(0.5,pt-prev.t);for(const k of ["br-lan","wlan0","eth0.2"]){const a=m.net[k],b=prev.net[k];if(a&&b){rx+=Math.max(0,a.rx-b.rx)/dt;tx+=Math.max(0,a.tx-b.tx)/dt}}}
+function startMetrics(){stopMetrics();const poll=async()=>{const m=await api("metrics");if(!m||m.error)return;const prev=METRIC_DATA[METRIC_DATA.length-1];const pt=(Date.now())/1000;let rx=0,tx=0;if(prev){const dt=Math.max(0.5,pt-prev.t);const ks=Object.keys(m.net).filter(k=>k!=="lo").sort();for(const k of ks.slice(0,4)){const a=m.net[k],b=prev.net[k];if(a&&b){rx+=Math.max(0,a.rx-b.rx)/dt;tx+=Math.max(0,a.tx-b.tx)/dt}}}
   METRIC_DATA.push({t:pt,load:m.load,mem:m.mem,disk:m.disk,net:m.net,rx:rx,tx:tx,procs:m.procs,conns:m.conns});if(METRIC_DATA.length>120)METRIC_DATA.shift();
   const pts=(f)=>{const a=[];for(let i=0;i<60;i++){const idx=METRIC_DATA.length-60+i;if(idx>=0&&METRIC_DATA[idx])a.push(f(METRIC_DATA[idx]))}return a};
   drawChart("c-load",[{values:pts(x=>x.load[0]),color:"#38bdf8"}]);
@@ -1157,8 +1172,8 @@ const EXAMPLES=[
  ["logread | grep -i error | tail -n 30","только ошибки из лога"],
  ["dmesg | tail -n 30","сообщения ядра (USB, сеть, ошибки)"],
  ["iwinfo","Wi-Fi интерфейсы и их состояние"],
- ["iwinfo wlan0 info","параметры точки доступа"],
- ["iwinfo wlan0 assoclist","подключённые Wi-Fi клиенты и сигнал"],
+ ["iwinfo","Wi-Fi интерфейсы и их параметры"],
+ ["iw dev","Wi-Fi интерфейсы (iw)"],
  ["cat /tmp/dhcp.leases","выданные DHCP-адреса"],
  ["ip -4 addr","IP-адреса интерфейсов"],
  ["ip route","таблица маршрутов"],
