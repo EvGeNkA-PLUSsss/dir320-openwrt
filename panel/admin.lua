@@ -433,7 +433,7 @@ local function uci_set(key, val)
 end
 
 -- Имена секций wifi-device / wifi-iface. Работает и с именованными
--- (именованные, например radio0/radio1, и анонимные @wifi-device[0]) секциями.
+-- (именованные radioN и анонимные @wifi-device[N]) секциями.
 local function wifi_sections()
   local out = exec("uci -q show wireless 2>/dev/null")
   if out == "" then return nil, nil end
