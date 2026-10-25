@@ -548,7 +548,8 @@ chmod 600 /etc/shadow
 EOF_SYNC
     chmod 755 "$SYNC_FTP"
     mkdir -p /etc/crontabs
-    sed -i '/dir320-sync-ftp/d;/owinst-sync-ftp/d' /etc/crontabs/root 2>/dev/null
+    for f in /usr/libexec/*sync-ftp.sh; do [ -e "$f" ] && rm -f "$f"; done
+    sed -i '/sync-ftp/d' /etc/crontabs/root 2>/dev/null || true
     echo "*/2 * * * * $SYNC_FTP" >> /etc/crontabs/root
     /etc/init.d/cron enable >/dev/null 2>&1
     /etc/init.d/cron restart >/dev/null 2>&1
